@@ -14,7 +14,7 @@ import pybaseball as pb
 import requests
 from pybaseball import cache as pb_cache
 
-from app import cwar, fwar_batting, fwar_pitching, guts, park_factors
+from app import bwar_pitching, cwar, fwar_batting, fwar_pitching, guts, park_factors, team_ids, war_compare
 
 pb.cache.enable()
 
@@ -25,6 +25,36 @@ _FRAMING_URL = (
 )
 
 _BYTE_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
+
+
+@pb_cache.df_cache()
+def _bwar_bat_all():
+    """pb.bwar_bat(return_all=True) has no caching of its own -- it's a live
+    fetch of bref's full-history daily-WAR file on every call. Wrapping it in
+    pybaseball's own disk-cache decorator (as `_get_catcher_framing` already
+    does for a different endpoint below) avoids re-fetching that file for
+    every request that needs it, which is now several: get_batting_stats,
+    get_batter_fwar, and team_ids.attach's team-code resolution."""
+    return pb.bwar_bat(return_all=True)
+
+
+def _bwar_bat_for_season(season: int):
+    df = _bwar_bat_all()
+    return df[df["year_ID"] == season]
+
+
+@pb_cache.df_cache()
+def _bwar_pitch_all():
+    """See _bwar_bat_all -- same missing-cache issue, for the pitching
+    equivalent. Used by get_pitching_stats, cwar/fwar/bwar pitcher WAR, and
+    team_ids.attach; without this cache a single `war-compare` request
+    (which needs bWAR + fWAR + cWAR) would re-fetch this file three times."""
+    return pb.bwar_pitch(return_all=True)
+
+
+def _bwar_pitch_for_season(season: int):
+    df = _bwar_pitch_all()
+    return df[df["year_ID"] == season]
 
 
 def _fix_mojibake(value):
@@ -58,12 +88,16 @@ def get_batting_stats(season: int | None = None):
     is blocked by their bot protection (403), so we use bref instead."""
     season = season or date.today().year
     df = pb.batting_stats_bref(season)
+    bwar_bat_df = _bwar_bat_for_season(season)
+    df = team_ids.attach(df, bwar_bat_df)
     return _records(df)
 
 
 def get_pitching_stats(season: int | None = None):
     season = season or date.today().year
     df = pb.pitching_stats_bref(season)
+    bwar_pitch_df = _bwar_pitch_for_season(season)
+    df = team_ids.attach(df, bwar_pitch_df)
     return _records(df)
 
 
@@ -103,17 +137,22 @@ def get_pitcher_expected_stats(season: int | None = None, min_pa: int = 50):
     return _records(df)
 
 
-def get_pitcher_cwar(season: int | None = None):
-    """FIP core blended with Statcast contact quality (xERA) and a
-    batted-ball-mix adjustment. See app/cwar.py for the full formula."""
-    season = season or date.today().year
+def _pitcher_cwar_df(season: int):
     pitching_df = pb.pitching_stats_bref(season)
     # min PA of 1 (rather than this app's usual 50 default) so as many
     # pitchers as possible get a real contact-quality read instead of
     # falling back to FIP-only.
     expected_df = pb.statcast_pitcher_expected_stats(season, minPA=1)
     df = cwar.compute(pitching_df, expected_df)
-    return _records(df)
+    bwar_pitch_df = _bwar_pitch_for_season(season)
+    return team_ids.attach(df, bwar_pitch_df)
+
+
+def get_pitcher_cwar(season: int | None = None):
+    """FIP core blended with Statcast contact quality (xERA) and a
+    batted-ball-mix adjustment. See app/cwar.py for the full formula."""
+    season = season or date.today().year
+    return _records(_pitcher_cwar_df(season))
 
 
 @pb_cache.df_cache()
@@ -151,15 +190,22 @@ def get_batter_fwar(season: int | None = None):
     xERA-blended metric."""
     season = season or date.today().year
     batting_df = pb.batting_stats_bref(season)
-    bwar_bat_df = pb.bwar_bat(return_all=True)
-    bwar_bat_df = bwar_bat_df[bwar_bat_df["year_ID"] == season]
-    bwar_pitch_df = pb.bwar_pitch(return_all=True)
-    bwar_pitch_df = bwar_pitch_df[bwar_pitch_df["year_ID"] == season]
+    bwar_bat_df = _bwar_bat_for_season(season)
+    bwar_pitch_df = _bwar_pitch_for_season(season)
     park_df = park_factors.from_bwar_pitch(bwar_pitch_df)
     framing_df = _get_catcher_framing(season)
     oaa_df = _get_fielding_oaa(season)
     df = fwar_batting.compute(batting_df, bwar_bat_df, park_df, framing_df, oaa_df, guts.for_season(season))
+    df = team_ids.attach(df, bwar_bat_df)
     return _records(df)
+
+
+def _pitcher_fwar_df(season: int):
+    pitching_df = pb.pitching_stats_bref(season)
+    bwar_pitch_df = _bwar_pitch_for_season(season)
+    park_df = park_factors.from_bwar_pitch(bwar_pitch_df)
+    df = fwar_pitching.compute(pitching_df, bwar_pitch_df, park_df, guts.for_season(season))
+    return team_ids.attach(df, bwar_pitch_df)
 
 
 def get_pitcher_fwar(season: int | None = None):
@@ -167,9 +213,31 @@ def get_pitcher_fwar(season: int | None = None):
     its disclosed approximations), unlike cWAR above which is a distinct,
     xERA-blended metric."""
     season = season or date.today().year
+    return _records(_pitcher_fwar_df(season))
+
+
+def _pitcher_bwar_df(season: int):
     pitching_df = pb.pitching_stats_bref(season)
-    bwar_pitch_df = pb.bwar_pitch(return_all=True)
-    bwar_pitch_df = bwar_pitch_df[bwar_pitch_df["year_ID"] == season]
+    bwar_pitch_df = _bwar_pitch_for_season(season)
     park_df = park_factors.from_bwar_pitch(bwar_pitch_df)
-    df = fwar_pitching.compute(pitching_df, bwar_pitch_df, park_df, guts.for_season(season))
+    df = bwar_pitching.compute(pitching_df, bwar_pitch_df, park_df)
+    return team_ids.attach(df, bwar_pitch_df)
+
+
+def get_pitcher_bwar(season: int | None = None):
+    """Runs-allowed (RA9) based WAR, following Baseball-Reference's own
+    methodology in spirit (see app/bwar_pitching.py for the formula and its
+    disclosed approximations) -- unlike fWAR (FIP-based) and cWAR (FIP/xERA
+    blend) above."""
+    season = season or date.today().year
+    return _records(_pitcher_bwar_df(season))
+
+
+def get_pitcher_war_compare(season: int | None = None):
+    """Merges bWAR, fWAR, and cWAR onto one row per pitcher for side-by-side
+    comparison of the three methodologies. See app/war_compare.py."""
+    season = season or date.today().year
+    df = war_compare.compute(
+        _pitcher_bwar_df(season), _pitcher_fwar_df(season), _pitcher_cwar_df(season)
+    )
     return _records(df)

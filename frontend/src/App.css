@@ -82,6 +82,15 @@
   gap: 1rem;
 }
 
+/* Grid items default to a content-based automatic min-width, so a table
+   wider than its column (nowrap cells, six-column layout) would overflow
+   into the next grid column instead of shrinking -- min-width: 0 lets the
+   column shrink to the track size and the wrapping .table-scroll's
+   overflow-x: auto take over instead. */
+.standings-grid > .table-scroll {
+  min-width: 0;
+}
+
 .stats-table {
   border-collapse: collapse;
   width: 100%;

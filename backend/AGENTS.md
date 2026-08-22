@@ -27,6 +27,13 @@ uvicorn app.main:app --reload   # http://localhost:8000
   the formula and its disclosed approximations (park/positional value come from
   Baseball-Reference's daily WAR files; fielding value comes from Statcast OAA/catcher framing;
   baserunning is a real wSB calculation).
+- `app/bwar_pitching.py` — real bWAR-methodology (RA9/runs-allowed based) WAR for pitchers, a
+  third distinct metric alongside cWAR and fWAR. Shares `park_factors.py` with fWAR (including
+  `park_factors.primary_team`, the one-row-per-stint team lookup both modules use). See the
+  README's "bWAR" section.
+- `app/war_compare.py` — pure merge (no new math) of bWAR/fWAR/cWAR's already-computed output
+  onto one row per pitcher, for the frontend's "WAR Compare" tab. Called from
+  `pybaseball_client.get_pitcher_war_compare`.
 
 ## Adding a new stat endpoint
 

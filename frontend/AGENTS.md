@@ -33,6 +33,11 @@ backend field rather than a raw pybaseball passthrough: it hits `/api/stats/pitc
 (see `backend/app/cwar.py` for the actual metric) and otherwise reuses the same
 `FILTER_CONFIG`/`columnsFor` pattern as `pitching`, just with its own `CWAR_COLS`.
 
+The `war_compare` tab (bWAR/fWAR/cWAR side by side) is the same pattern again -- one endpoint,
+one `*_COLS` array -- even though the backend row it renders is itself a merge of three other
+metrics' output (`backend/app/war_compare.py`). The merge happens server-side; the frontend
+never fetches multiple endpoints for one tab, so don't special-case this tab's data fetching.
+
 ## Filtering/search/sort
 
 `FILTER_CONFIG[tab]` describes, per tab: which field holds the player's name (`nameField`,
@@ -65,6 +70,14 @@ reuse that pattern rather than comparing the raw field for equality.
 Plain CSS in `App.css`, dark theme, no CSS variables/framework — colors are hardcoded
 (`#242424` background, `#646cff` accent, `#444` borders). Match those values for new UI rather
 than introducing a new palette.
+
+Any table placed inside a CSS Grid (like `.standings-grid`'s per-division tables) needs its
+grid item wrapped in a `.table-scroll` (`overflow-x: auto`) div *and* given `min-width: 0` —
+grid items default to a content-based automatic minimum size, so a `white-space: nowrap` table
+wider than its column (e.g. a division with bref's extra `E#` "magic number" column, next to
+divisions without it) won't shrink to fit; it overflows into the neighboring grid column
+instead of scrolling, which reads as broken/overlapping cells and missing data even though
+every row is actually present. See `.standings-grid > .table-scroll` in `App.css`.
 
 ## No tests currently
 

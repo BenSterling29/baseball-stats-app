@@ -118,4 +118,4 @@ def compute(pitching_df, expected_df):
         df[col] = df[col].round(3)
     df["cWAR"] = df["cWAR"].round(2)
 
-    return df.drop(columns=["mlbID", "bip"])
+    return df.drop(columns=["bip"])

@@ -13,6 +13,16 @@ import pandas as pd
 NEUTRAL_PF = 1.0
 
 
+def primary_team(bwar_pitch_df):
+    """bwar_pitch has one row per player-team-stint; take the highest-IP
+    stint's team as primary, e.g. for a park factor lookup."""
+    df = bwar_pitch_df.copy()
+    df["mlb_ID"] = pd.to_numeric(df["mlb_ID"], errors="coerce")
+    df["IPouts"] = pd.to_numeric(df["IPouts"], errors="coerce")
+    idx = df.groupby("mlb_ID")["IPouts"].idxmax()
+    return df.loc[idx, ["mlb_ID", "team_ID"]]
+
+
 def from_bwar_pitch(bwar_pitch_df):
     """bwar_pitch_df: pb.bwar_pitch(return_all=True) output, already
     filtered to one season. Returns DataFrame[team_ID, PF] (~1.0 = neutral).

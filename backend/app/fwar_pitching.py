@@ -24,16 +24,6 @@ REPLACEMENT_WPG_RELIEVER = 0.03  # FanGraphs: gap between avg (.500) and replace
 REPLACEMENT_WPG_STARTER = 0.12   # FanGraphs: gap between avg (.500) and replacement (.380) win% for SP
 
 
-def _primary_team(bwar_pitch_df):
-    """bwar_pitch has one row per player-team-stint; take the highest-IP
-    stint's team as primary, for the park factor lookup."""
-    df = bwar_pitch_df.copy()
-    df["mlb_ID"] = pd.to_numeric(df["mlb_ID"], errors="coerce")
-    df["IPouts"] = pd.to_numeric(df["IPouts"], errors="coerce")
-    idx = df.groupby("mlb_ID")["IPouts"].idxmax()
-    return df.loc[idx, ["mlb_ID", "team_ID"]]
-
-
 def compute(pitching_df, bwar_pitch_df, park_df, guts_for_season):
     """pitching_df: pb.pitching_stats_bref() output.
     bwar_pitch_df: pb.bwar_pitch(return_all=True) output, pre-filtered to season.
@@ -62,7 +52,7 @@ def compute(pitching_df, bwar_pitch_df, park_df, guts_for_season):
     # sample FIPs. Simplification: MLB-wide, not split by AL/NL.
     league_fip_r9 = (fip_r9 * df["IP"]).sum() / league_ip
 
-    team_lookup = _primary_team(bwar_pitch_df)
+    team_lookup = park_factors.primary_team(bwar_pitch_df)
     df = df.merge(team_lookup, left_on="mlbID", right_on="mlb_ID", how="left")
     df["PF"] = park_factors.attach(df, park_df, team_col="team_ID")
 

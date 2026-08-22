@@ -47,6 +47,8 @@ frontend/
 | `GET /api/stats/pitching/cwar?season=` | Baseball-Reference + Baseball Savant | custom pitcher WAR (see below) |
 | `GET /api/stats/batting/fwar?season=` | Baseball-Reference | fWAR-methodology batter WAR (see below) |
 | `GET /api/stats/pitching/fwar?season=` | Baseball-Reference | fWAR-methodology pitcher WAR (see below) |
+| `GET /api/stats/pitching/bwar?season=` | Baseball-Reference | bWAR-methodology (RA9-based) pitcher WAR (see below) |
+| `GET /api/stats/pitching/war-compare?season=` | Baseball-Reference + Baseball Savant | bWAR/fWAR/cWAR merged for comparison |
 | `GET /api/savant/batting/exitvelo?season=&min_bbe=` | Baseball Savant | exit velo / barrel rate |
 | `GET /api/savant/pitching/exitvelo?season=&min_bbe=` | Baseball Savant | exit velo / barrel rate allowed |
 | `GET /api/savant/batting/expected?season=&min_pa=` | Baseball Savant | xBA / xSLG / xwOBA |
@@ -56,8 +58,8 @@ frontend/
 
 ## Frontend features
 
-- Tabs for Standings, Batting, Pitching, cWAR, fWAR (Bat), fWAR (Pit), Exit Velo/Barrels,
-  Expected Stats (the last two toggle between batting and pitching leaders).
+- Tabs for Standings, Batting, Pitching, cWAR, fWAR (Bat), fWAR (Pit), bWAR (Pit), WAR Compare,
+  Exit Velo/Barrels, Expected Stats (the last two toggle between batting and pitching leaders).
 - Player name search, team filter, and a min-PA/min-IP/min-BBE threshold per tab.
 - Click any column header to sort; click again to reverse direction.
 - Results are cached client-side per (tab, season, filter) combination, so switching tabs
@@ -143,6 +145,46 @@ WAR formulas (`backend/app/fwar_batting.py`, `backend/app/fwar_pitching.py`):
 
 In practice these land close to FanGraphs' own published fWAR for a given season, but expect
 small differences rather than an exact match.
+
+## bWAR: Baseball-Reference-methodology WAR, for pitchers
+
+`bWAR` (`backend/app/bwar_pitching.py`) follows Baseball-Reference's own published pitcher WAR
+formula in spirit (https://www.baseball-reference.com/about/war_explained_pitch.shtml). The
+key difference from `fWAR` above: bWAR rates a pitcher on his own actual runs allowed (RA9),
+not an FIP estimate. Baseball-Reference deliberately credits/blames a pitcher for everything
+that happened while he was in the game -- including BABIP, sequencing, and defense -- rather
+than isolating FIP's three "true outcomes" (K, BB, HR). Structurally it reuses the same shape
+as `fWAR`'s pitching formula (park adjustment, dynamic runs-per-win, starter/reliever
+replacement-level split), just with RA9 in place of FIP-on-a-runs-allowed-basis:
+
+1. **RA9** — `9 · R / IP`, the pitcher's own actual runs (not earned runs) allowed per 9 innings.
+2. **Park adjustment** — RA9 is divided by the same Baseball-Reference-derived park factor
+   (`park_factors.py`) fWAR uses, then compared against the league's flat average RA9.
+3. **Dynamic runs-per-win and replacement level** — identical formulas to fWAR's pitching side:
+   a pitcher's own innings/game shift how many runs one win is worth for him, and the
+   starter/reliever replacement-level split reuses FanGraphs' published win-percentage gap
+   (`.12`/`.03` WPG), since a bref-specific equivalent isn't published anywhere pybaseball
+   exposes.
+
+**Disclosed simplifications:** bref's real formula also adjusts for the strength of the batters
+a pitcher actually faced and the quality of the defense playing behind him (`RA9opp`, `RA9def`,
+`RA9role`) — neither is available via pybaseball, so this compares park-adjusted RA9 against a
+flat league average instead of an opponent/defense-adjusted one. As with fWAR, expect this to
+land close to (not bit-exact with) Baseball-Reference's own published bWAR.
+
+Note: `pb.bwar_pitch()` already exposes bref's own precomputed `WAR` column directly — this app
+deliberately recomputes the metric from raw components instead of passing that through, the
+same choice fWAR makes relative to FanGraphs' own numbers, so the formula is inspectable and
+consistent with how the other two metrics are built.
+
+## WAR Compare: bWAR vs. fWAR vs. cWAR side by side
+
+The "WAR Compare" tab (`GET /api/stats/pitching/war-compare`, `backend/app/war_compare.py`)
+merges all three pitcher WAR metrics onto one row per pitcher — Name, Tm, IP, `bWAR`, `fWAR`,
+`cWAR`, plus a `WAR_spread` column (the gap between the highest and lowest of the three) to
+make players the methodologies disagree on easy to spot. It's a pure merge of each metric's
+already-computed output — no new math, and none of `bwar_pitching.py`/`fwar_pitching.py`/
+`cwar.py` themselves are touched by it.
 
 ## Why not FanGraphs directly?
 

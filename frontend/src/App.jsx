@@ -10,6 +10,8 @@ const TABS = [
   { key: 'cwar', label: 'cWAR' },
   { key: 'fwar_batting', label: 'fWAR (Bat)' },
   { key: 'fwar_pitching', label: 'fWAR (Pit)' },
+  { key: 'bwar_pitching', label: 'bWAR (Pit)' },
+  { key: 'war_compare', label: 'WAR Compare' },
   { key: 'exitvelo', label: 'Exit Velo / Barrels' },
   { key: 'expected', label: 'Expected Stats' },
 ]
@@ -23,6 +25,8 @@ const ENDPOINTS = {
   cwar: () => '/api/stats/pitching/cwar',
   fwar_batting: () => '/api/stats/batting/fwar',
   fwar_pitching: () => '/api/stats/pitching/fwar',
+  bwar_pitching: () => '/api/stats/pitching/bwar',
+  war_compare: () => '/api/stats/pitching/war-compare',
   exitvelo: (side) => `/api/savant/${side}/exitvelo`,
   expected: (side) => `/api/savant/${side}/expected`,
 }
@@ -32,6 +36,8 @@ const PITCHING_COLS = ['Name', 'Tm', 'W', 'L', 'ERA', 'G', 'GS', 'SV', 'IP', 'SO
 const CWAR_COLS = ['Name', 'Tm', 'IP', 'ERA', 'FIP', 'xERA', 'GB%', 'FB%', 'PU%', 'cWAR']
 const FWAR_BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'wOBA', 'wRAA', 'BsR', 'Fld', 'Pos', 'fWAR']
 const FWAR_PITCHING_COLS = ['Name', 'Tm', 'G', 'GS', 'IP', 'ERA', 'FIP', 'PF', 'fWAR']
+const BWAR_PITCHING_COLS = ['Name', 'Tm', 'G', 'GS', 'IP', 'ERA', 'RA9', 'PF', 'bWAR']
+const WAR_COMPARE_COLS = ['Name', 'Tm', 'IP', 'bWAR', 'fWAR', 'cWAR', 'WAR_spread']
 const EXITVELO_COLS = [
   'last_name, first_name', 'attempts', 'avg_hit_speed', 'max_hit_speed',
   'ev95percent', 'barrels', 'brl_percent', 'brl_pa', 'avg_distance', 'max_distance',
@@ -47,11 +53,13 @@ const EXPECTED_COLS = {
 // the threshold is sent to the backend (it controls the SQL-side qualifier
 // pybaseball applies) instead of just hiding rows client-side.
 const FILTER_CONFIG = {
-  batting: { nameField: 'Name', teamField: 'Tm', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
-  pitching: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
-  cwar: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
-  fwar_batting: { nameField: 'Name', teamField: 'Tm', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
-  fwar_pitching: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  batting: { nameField: 'Name', teamField: 'TmID', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
+  pitching: { nameField: 'Name', teamField: 'TmID', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  cwar: { nameField: 'Name', teamField: 'TmID', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  fwar_batting: { nameField: 'Name', teamField: 'TmID', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
+  fwar_pitching: { nameField: 'Name', teamField: 'TmID', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  bwar_pitching: { nameField: 'Name', teamField: 'TmID', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  war_compare: { nameField: 'Name', teamField: 'TmID', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
   exitvelo: { nameField: 'last_name, first_name', teamField: null, minField: 'attempts', minLabel: 'Min BBE', minDefault: 50, serverParam: 'min_bbe' },
   expected: { nameField: 'last_name, first_name', teamField: null, minField: 'pa', minLabel: 'Min PA', minDefault: 50, serverParam: 'min_pa' },
 }
@@ -62,6 +70,8 @@ function columnsFor(tab, side) {
   if (tab === 'cwar') return CWAR_COLS
   if (tab === 'fwar_batting') return FWAR_BATTING_COLS
   if (tab === 'fwar_pitching') return FWAR_PITCHING_COLS
+  if (tab === 'bwar_pitching') return BWAR_PITCHING_COLS
+  if (tab === 'war_compare') return WAR_COMPARE_COLS
   if (tab === 'exitvelo') return EXITVELO_COLS
   if (tab === 'expected') return EXPECTED_COLS[side]
   return []
@@ -92,24 +102,27 @@ function compareValues(a, b) {
 }
 
 function StandingsTable({ divisions }) {
-  if (!divisions?.length) return <p>Loading standings...</p>
+  if (divisions === undefined) return <p>Loading standings...</p>
+  if (!divisions.length) return <p>No standings data returned for this season.</p>
   return (
     <div className="standings-grid">
       {divisions.map((division, i) => (
-        <table key={i} className="stats-table">
-          <thead>
-            <tr>
-              {division[0] && Object.keys(division[0]).map((col) => <th key={col}>{col}</th>)}
-            </tr>
-          </thead>
-          <tbody>
-            {division.map((row, j) => (
-              <tr key={j}>
-                {Object.values(row).map((val, k) => <td key={k}>{String(val)}</td>)}
+        <div key={i} className="table-scroll">
+          <table className="stats-table">
+            <thead>
+              <tr>
+                {division[0] && Object.keys(division[0]).map((col) => <th key={col}>{col}</th>)}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {division.map((row, j) => (
+                <tr key={j}>
+                  {Object.values(row).map((val, k) => <td key={k}>{String(val)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ))}
     </div>
   )
@@ -118,7 +131,7 @@ function StandingsTable({ divisions }) {
 // JSON drops trailing zeros (round(2.50, 2) serializes as 2.5), which makes
 // WAR-style columns render raggedly next to each other -- fix the display
 // width here rather than trying to force it through JSON serialization.
-const COLUMN_DECIMALS = { fWAR: 1, cWAR: 2, wOBA: 3, wRAA: 1, BsR: 1, Fld: 1, Pos: 1, FIP: 2, PF: 3 }
+const COLUMN_DECIMALS = { fWAR: 1, cWAR: 2, bWAR: 1, WAR_spread: 2, wOBA: 3, wRAA: 1, BsR: 1, Fld: 1, Pos: 1, FIP: 2, RA9: 2, PF: 3 }
 
 function formatCell(col, val) {
   if (val === null || val === undefined || val === '') return ''
