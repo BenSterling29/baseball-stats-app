@@ -3,6 +3,43 @@ import './App.css'
 
 const CURRENT_YEAR = new Date().getFullYear()
 
+const TABS = [
+  { key: 'standings', label: 'Standings' },
+  { key: 'batting', label: 'Batting' },
+  { key: 'pitching', label: 'Pitching' },
+  { key: 'exitvelo', label: 'Exit Velo / Barrels' },
+  { key: 'expected', label: 'Expected Stats' },
+]
+
+const SIDED_TABS = new Set(['exitvelo', 'expected'])
+
+const ENDPOINTS = {
+  standings: () => '/api/standings',
+  batting: () => '/api/stats/batting',
+  pitching: () => '/api/stats/pitching',
+  exitvelo: (side) => `/api/savant/${side}/exitvelo`,
+  expected: (side) => `/api/savant/${side}/expected`,
+}
+
+const BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'AB', 'R', 'H', 'HR', 'RBI', 'SB', 'BA', 'OBP', 'SLG', 'OPS']
+const PITCHING_COLS = ['Name', 'Tm', 'W', 'L', 'ERA', 'G', 'GS', 'SV', 'IP', 'SO', 'WHIP', 'SO9']
+const EXITVELO_COLS = [
+  'last_name, first_name', 'attempts', 'avg_hit_speed', 'max_hit_speed',
+  'ev95percent', 'barrels', 'brl_percent', 'brl_pa', 'avg_distance', 'max_distance',
+]
+const EXPECTED_COLS = {
+  batting: ['last_name, first_name', 'pa', 'ba', 'est_ba', 'slg', 'est_slg', 'woba', 'est_woba'],
+  pitching: ['last_name, first_name', 'pa', 'bip', 'ba', 'est_ba', 'slg', 'est_slg', 'woba', 'est_woba', 'era', 'xera'],
+}
+
+function columnsFor(tab, side) {
+  if (tab === 'batting') return BATTING_COLS
+  if (tab === 'pitching') return PITCHING_COLS
+  if (tab === 'exitvelo') return EXITVELO_COLS
+  if (tab === 'expected') return EXPECTED_COLS[side]
+  return []
+}
+
 function StandingsTable({ divisions }) {
   if (!divisions?.length) return <p>Loading standings...</p>
   return (
@@ -48,36 +85,24 @@ function StatsTable({ rows, columns }) {
 
 function App() {
   const [tab, setTab] = useState('standings')
+  const [side, setSide] = useState('batting')
   const [season, setSeason] = useState(CURRENT_YEAR)
-  const [standings, setStandings] = useState(null)
-  const [batting, setBatting] = useState(null)
-  const [pitching, setPitching] = useState(null)
+  const [cache, setCache] = useState({})
   const [error, setError] = useState(null)
 
-  useEffect(() => {
-    setError(null)
-    if (tab === 'standings' && standings === null) {
-      fetch(`/api/standings?season=${season}`)
-        .then((r) => r.json())
-        .then(setStandings)
-        .catch((e) => setError(String(e)))
-    }
-    if (tab === 'batting' && batting === null) {
-      fetch(`/api/stats/batting?season=${season}`)
-        .then((r) => r.json())
-        .then(setBatting)
-        .catch((e) => setError(String(e)))
-    }
-    if (tab === 'pitching' && pitching === null) {
-      fetch(`/api/stats/pitching?season=${season}`)
-        .then((r) => r.json())
-        .then(setPitching)
-        .catch((e) => setError(String(e)))
-    }
-  }, [tab, season])
+  const cacheKey = `${tab}:${side}:${season}`
 
-  const battingCols = ['Name', 'Tm', 'G', 'PA', 'AB', 'R', 'H', 'HR', 'RBI', 'SB', 'BA', 'OBP', 'SLG', 'OPS']
-  const pitchingCols = ['Name', 'Tm', 'W', 'L', 'ERA', 'G', 'GS', 'SV', 'IP', 'SO', 'WHIP', 'SO9']
+  useEffect(() => {
+    if (cache[cacheKey] !== undefined) return
+    setError(null)
+    const endpoint = ENDPOINTS[tab](side)
+    fetch(`${endpoint}?season=${season}`)
+      .then((r) => r.json())
+      .then((data) => setCache((prev) => ({ ...prev, [cacheKey]: data })))
+      .catch((e) => setError(String(e)))
+  }, [cacheKey, tab, side, season])
+
+  const data = cache[cacheKey]
 
   return (
     <div className="app">
@@ -88,28 +113,34 @@ function App() {
           <input
             type="number"
             value={season}
-            onChange={(e) => {
-              setSeason(Number(e.target.value))
-              setStandings(null)
-              setBatting(null)
-              setPitching(null)
-            }}
+            onChange={(e) => setSeason(Number(e.target.value))}
           />
         </label>
         <nav className="tabs">
-          {['standings', 'batting', 'pitching'].map((t) => (
-            <button key={t} className={tab === t ? 'active' : ''} onClick={() => setTab(t)}>
-              {t}
+          {TABS.map((t) => (
+            <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>
+              {t.label}
             </button>
           ))}
         </nav>
+        {SIDED_TABS.has(tab) && (
+          <nav className="tabs">
+            {['batting', 'pitching'].map((s) => (
+              <button key={s} className={side === s ? 'active' : ''} onClick={() => setSide(s)}>
+                {s}
+              </button>
+            ))}
+          </nav>
+        )}
       </div>
 
       {error && <p className="error">Error: {error}</p>}
 
-      {tab === 'standings' && <StandingsTable divisions={standings} />}
-      {tab === 'batting' && <StatsTable rows={batting} columns={battingCols} />}
-      {tab === 'pitching' && <StatsTable rows={pitching} columns={pitchingCols} />}
+      {tab === 'standings' ? (
+        <StandingsTable divisions={data} />
+      ) : (
+        <StatsTable rows={data} columns={columnsFor(tab, side)} />
+      )}
     </div>
   )
 }

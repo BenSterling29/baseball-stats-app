@@ -65,3 +65,27 @@ def get_recent_statcast(days_back: int = 3):
     start = end - timedelta(days=days_back)
     df = pb.statcast(start_dt=start.isoformat(), end_dt=end.isoformat())
     return _records(df)
+
+
+def get_batter_exitvelo_barrels(season: int | None = None, min_bbe: int = 50):
+    season = season or date.today().year
+    df = pb.statcast_batter_exitvelo_barrels(season, minBBE=min_bbe)
+    return _records(df)
+
+
+def get_pitcher_exitvelo_barrels(season: int | None = None, min_bbe: int = 50):
+    season = season or date.today().year
+    df = pb.statcast_pitcher_exitvelo_barrels(season, minBBE=min_bbe)
+    return _records(df)
+
+
+def get_batter_expected_stats(season: int | None = None, min_pa: int = 50):
+    season = season or date.today().year
+    df = pb.statcast_batter_expected_stats(season, minPA=min_pa)
+    return _records(df)
+
+
+def get_pitcher_expected_stats(season: int | None = None, min_pa: int = 50):
+    season = season or date.today().year
+    df = pb.statcast_pitcher_expected_stats(season, minPA=min_pa)
+    return _records(df)
