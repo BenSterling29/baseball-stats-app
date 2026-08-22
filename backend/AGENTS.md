@@ -104,3 +104,21 @@ uvicorn app.main:app --reload   # http://localhost:8000
 - No ORM/database — every request hits pybaseball (cache permitting) and returns fresh data.
 - No auth — this is a local-only single-user app.
 - After adding a dependency: `pip install <pkg> && pip freeze > requirements.txt`.
+
+## Documenting your own changes
+
+Update this file and the README in the same change that makes them true — don't wait to be
+asked, and don't leave it for a follow-up. Concretely:
+
+- New route or module → add it to the README's API route table and to the "Structure" list
+  above.
+- New non-obvious pybaseball/data-source behavior you had to work around → add it to
+  "Data-source gotchas" above, in the same style as the existing entries (what's surprising,
+  how it was confirmed, what to do instead).
+- New metric or formula (like cWAR/fWAR) → give it its own README section explaining the
+  formula, what it deliberately does/doesn't include, and why.
+- A bug you found and fixed while building something else → worth a line in the relevant
+  gotcha/README section if the next person could plausibly reintroduce it.
+
+Treat a change as incomplete if it needs one of these updates and doesn't have it, the same way
+you'd treat it as incomplete without tests in a repo that had them.

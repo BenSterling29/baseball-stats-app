@@ -70,3 +70,11 @@ than introducing a new palette.
 
 Verify changes by running both dev servers and checking in a browser — there's no test suite
 or CI to lean on yet.
+
+## Documenting your own changes
+
+Update this file and the README in the same change that makes them true — don't wait to be
+asked. New tab → add it to the README's tab list. New filtering strategy, styling convention,
+or non-obvious quirk (like the traded-player comma-joined team string) → add it here, in the
+same style as the existing entries. Treat a change as incomplete if it needs one of these
+updates and doesn't have it.
