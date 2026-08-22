@@ -20,6 +20,11 @@ def pitching_stats(season: int | None = None):
     return pbc.get_pitching_stats(season)
 
 
+@router.get("/stats/pitching/cwar")
+def pitching_cwar(season: int | None = None):
+    return pbc.get_pitcher_cwar(season)
+
+
 @router.get("/players/search")
 def player_search(last: str = Query(...), first: str | None = None):
     return pbc.search_player(last, first)

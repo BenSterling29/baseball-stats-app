@@ -10,6 +10,8 @@ from datetime import date, timedelta
 
 import pybaseball as pb
 
+from app import cwar
+
 pb.cache.enable()
 
 _BYTE_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
@@ -88,4 +90,17 @@ def get_batter_expected_stats(season: int | None = None, min_pa: int = 50):
 def get_pitcher_expected_stats(season: int | None = None, min_pa: int = 50):
     season = season or date.today().year
     df = pb.statcast_pitcher_expected_stats(season, minPA=min_pa)
+    return _records(df)
+
+
+def get_pitcher_cwar(season: int | None = None):
+    """FIP core blended with Statcast contact quality (xERA) and a
+    batted-ball-mix adjustment. See app/cwar.py for the full formula."""
+    season = season or date.today().year
+    pitching_df = pb.pitching_stats_bref(season)
+    # min PA of 1 (rather than this app's usual 50 default) so as many
+    # pitchers as possible get a real contact-quality read instead of
+    # falling back to FIP-only.
+    expected_df = pb.statcast_pitcher_expected_stats(season, minPA=1)
+    df = cwar.compute(pitching_df, expected_df)
     return _records(df)

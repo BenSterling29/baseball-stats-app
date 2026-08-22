@@ -15,6 +15,10 @@ uvicorn app.main:app --reload   # http://localhost:8000
   DataFrame — routers should never touch pandas.
 - `app/routers/stats.py` — thin HTTP layer. Each route just parses query params and calls a
   `pybaseball_client` function. Keep it that way; put scraping/data logic in the client module.
+- `app/cwar.py` — pure-pandas math for the custom pitcher WAR metric (no `pybaseball` import;
+  takes DataFrames in, returns a DataFrame with added columns). Called from
+  `pybaseball_client.get_pitcher_cwar`, which does the actual `pb.*` fetching/merging. See
+  the README's "cWAR" section for the formula and rationale.
 
 ## Adding a new stat endpoint
 
@@ -45,6 +49,17 @@ uvicorn app.main:app --reload   # http://localhost:8000
 - `pb.cache.enable()` runs at import time and persists to `~/.pybaseball/cache` with no TTL.
   If a test looks stale (e.g. after a trade or a stat correction), that's almost always why —
   delete the relevant file under that directory rather than assuming the endpoint is broken.
+- **`pitching_stats_bref`'s `GB/FB` column is actually GB% (a 0-1 rate), not a ratio** — the
+  name is misleading. Confirmed by checking known extreme groundball/flyball pitchers against
+  the values (e.g. submarine sinkerballer Tyler Rogers tops the leaderboard at 0.64, which
+  only makes sense as a rate). `cwar.py` derives FB% as `1 - LD - PU - GB%`; don't re-derive
+  it as `GB% / (1 + ratio)` elsewhere, it isn't a ratio.
+- **`pitching_stats_bref` returns a 1-based DataFrame index**, not the usual 0-based
+  `RangeIndex`. If you compute a pandas `Series` from it and later combine that Series with a
+  DataFrame that's been through a `merge()` (which resets the index), pandas will silently
+  align by index label and produce `NaN` for everything instead of erroring — this bit `cwar.py`
+  during development. `reset_index(drop=True)` right after fetching, before doing any
+  Series-producing math, avoids it.
 
 ## Conventions
 

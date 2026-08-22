@@ -28,6 +28,11 @@ in `App.jsx`, all near the top of the file:
 If the new tab has a batting/pitching split (like Exit Velo / Expected Stats), add its key to
 `SIDED_TABS` too — that's what makes the batting/pitching toggle row appear.
 
+The `cwar` tab is a good reference for a plain (non-sided) filtered tab backed by a computed
+backend field rather than a raw pybaseball passthrough: it hits `/api/stats/pitching/cwar`
+(see `backend/app/cwar.py` for the actual metric) and otherwise reuses the same
+`FILTER_CONFIG`/`columnsFor` pattern as `pitching`, just with its own `CWAR_COLS`.
+
 ## Filtering/search/sort
 
 `FILTER_CONFIG[tab]` describes, per tab: which field holds the player's name (`nameField`,

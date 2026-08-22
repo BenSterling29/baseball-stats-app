@@ -7,6 +7,7 @@ const TABS = [
   { key: 'standings', label: 'Standings' },
   { key: 'batting', label: 'Batting' },
   { key: 'pitching', label: 'Pitching' },
+  { key: 'cwar', label: 'cWAR' },
   { key: 'exitvelo', label: 'Exit Velo / Barrels' },
   { key: 'expected', label: 'Expected Stats' },
 ]
@@ -17,12 +18,14 @@ const ENDPOINTS = {
   standings: () => '/api/standings',
   batting: () => '/api/stats/batting',
   pitching: () => '/api/stats/pitching',
+  cwar: () => '/api/stats/pitching/cwar',
   exitvelo: (side) => `/api/savant/${side}/exitvelo`,
   expected: (side) => `/api/savant/${side}/expected`,
 }
 
 const BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'AB', 'R', 'H', 'HR', 'RBI', 'SB', 'BA', 'OBP', 'SLG', 'OPS']
 const PITCHING_COLS = ['Name', 'Tm', 'W', 'L', 'ERA', 'G', 'GS', 'SV', 'IP', 'SO', 'WHIP', 'SO9']
+const CWAR_COLS = ['Name', 'Tm', 'IP', 'ERA', 'FIP', 'xERA', 'GB%', 'FB%', 'PU%', 'cWAR']
 const EXITVELO_COLS = [
   'last_name, first_name', 'attempts', 'avg_hit_speed', 'max_hit_speed',
   'ev95percent', 'barrels', 'brl_percent', 'brl_pa', 'avg_distance', 'max_distance',
@@ -40,6 +43,7 @@ const EXPECTED_COLS = {
 const FILTER_CONFIG = {
   batting: { nameField: 'Name', teamField: 'Tm', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
   pitching: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  cwar: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
   exitvelo: { nameField: 'last_name, first_name', teamField: null, minField: 'attempts', minLabel: 'Min BBE', minDefault: 50, serverParam: 'min_bbe' },
   expected: { nameField: 'last_name, first_name', teamField: null, minField: 'pa', minLabel: 'Min PA', minDefault: 50, serverParam: 'min_pa' },
 }
@@ -47,6 +51,7 @@ const FILTER_CONFIG = {
 function columnsFor(tab, side) {
   if (tab === 'batting') return BATTING_COLS
   if (tab === 'pitching') return PITCHING_COLS
+  if (tab === 'cwar') return CWAR_COLS
   if (tab === 'exitvelo') return EXITVELO_COLS
   if (tab === 'expected') return EXPECTED_COLS[side]
   return []
