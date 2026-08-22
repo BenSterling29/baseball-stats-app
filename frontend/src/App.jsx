@@ -8,6 +8,8 @@ const TABS = [
   { key: 'batting', label: 'Batting' },
   { key: 'pitching', label: 'Pitching' },
   { key: 'cwar', label: 'cWAR' },
+  { key: 'fwar_batting', label: 'fWAR (Bat)' },
+  { key: 'fwar_pitching', label: 'fWAR (Pit)' },
   { key: 'exitvelo', label: 'Exit Velo / Barrels' },
   { key: 'expected', label: 'Expected Stats' },
 ]
@@ -19,6 +21,8 @@ const ENDPOINTS = {
   batting: () => '/api/stats/batting',
   pitching: () => '/api/stats/pitching',
   cwar: () => '/api/stats/pitching/cwar',
+  fwar_batting: () => '/api/stats/batting/fwar',
+  fwar_pitching: () => '/api/stats/pitching/fwar',
   exitvelo: (side) => `/api/savant/${side}/exitvelo`,
   expected: (side) => `/api/savant/${side}/expected`,
 }
@@ -26,6 +30,8 @@ const ENDPOINTS = {
 const BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'AB', 'R', 'H', 'HR', 'RBI', 'SB', 'BA', 'OBP', 'SLG', 'OPS']
 const PITCHING_COLS = ['Name', 'Tm', 'W', 'L', 'ERA', 'G', 'GS', 'SV', 'IP', 'SO', 'WHIP', 'SO9']
 const CWAR_COLS = ['Name', 'Tm', 'IP', 'ERA', 'FIP', 'xERA', 'GB%', 'FB%', 'PU%', 'cWAR']
+const FWAR_BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'wOBA', 'wRAA', 'BsR', 'Fld', 'Pos', 'fWAR']
+const FWAR_PITCHING_COLS = ['Name', 'Tm', 'G', 'GS', 'IP', 'ERA', 'FIP', 'PF', 'fWAR']
 const EXITVELO_COLS = [
   'last_name, first_name', 'attempts', 'avg_hit_speed', 'max_hit_speed',
   'ev95percent', 'barrels', 'brl_percent', 'brl_pa', 'avg_distance', 'max_distance',
@@ -44,6 +50,8 @@ const FILTER_CONFIG = {
   batting: { nameField: 'Name', teamField: 'Tm', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
   pitching: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
   cwar: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  fwar_batting: { nameField: 'Name', teamField: 'Tm', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
+  fwar_pitching: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
   exitvelo: { nameField: 'last_name, first_name', teamField: null, minField: 'attempts', minLabel: 'Min BBE', minDefault: 50, serverParam: 'min_bbe' },
   expected: { nameField: 'last_name, first_name', teamField: null, minField: 'pa', minLabel: 'Min PA', minDefault: 50, serverParam: 'min_pa' },
 }
@@ -52,6 +60,8 @@ function columnsFor(tab, side) {
   if (tab === 'batting') return BATTING_COLS
   if (tab === 'pitching') return PITCHING_COLS
   if (tab === 'cwar') return CWAR_COLS
+  if (tab === 'fwar_batting') return FWAR_BATTING_COLS
+  if (tab === 'fwar_pitching') return FWAR_PITCHING_COLS
   if (tab === 'exitvelo') return EXITVELO_COLS
   if (tab === 'expected') return EXPECTED_COLS[side]
   return []
@@ -105,6 +115,17 @@ function StandingsTable({ divisions }) {
   )
 }
 
+// JSON drops trailing zeros (round(2.50, 2) serializes as 2.5), which makes
+// WAR-style columns render raggedly next to each other -- fix the display
+// width here rather than trying to force it through JSON serialization.
+const COLUMN_DECIMALS = { fWAR: 1, cWAR: 2, wOBA: 3, wRAA: 1, BsR: 1, Fld: 1, Pos: 1, FIP: 2, PF: 3 }
+
+function formatCell(col, val) {
+  if (val === null || val === undefined || val === '') return ''
+  const decimals = COLUMN_DECIMALS[col]
+  return decimals !== undefined && Number.isFinite(Number(val)) ? Number(val).toFixed(decimals) : String(val)
+}
+
 function StatsTable({ rows, columns, sortField, sortDir, onSort }) {
   if (!rows) return <p>Loading...</p>
   if (!rows.length) return <p>No players match the current filters.</p>
@@ -123,7 +144,7 @@ function StatsTable({ rows, columns, sortField, sortDir, onSort }) {
         </thead>
         <tbody>
           {rows.map((row, i) => (
-            <tr key={i}>{columns.map((col) => <td key={col}>{String(row[col] ?? '')}</td>)}</tr>
+            <tr key={i}>{columns.map((col) => <td key={col}>{formatCell(col, row[col])}</td>)}</tr>
           ))}
         </tbody>
       </table>

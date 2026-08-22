@@ -45,6 +45,8 @@ frontend/
 | `GET /api/stats/batting?season=` | Baseball-Reference | full-season batting leaderboard |
 | `GET /api/stats/pitching?season=` | Baseball-Reference | full-season pitching leaderboard |
 | `GET /api/stats/pitching/cwar?season=` | Baseball-Reference + Baseball Savant | custom pitcher WAR (see below) |
+| `GET /api/stats/batting/fwar?season=` | Baseball-Reference | fWAR-methodology batter WAR (see below) |
+| `GET /api/stats/pitching/fwar?season=` | Baseball-Reference | fWAR-methodology pitcher WAR (see below) |
 | `GET /api/savant/batting/exitvelo?season=&min_bbe=` | Baseball Savant | exit velo / barrel rate |
 | `GET /api/savant/pitching/exitvelo?season=&min_bbe=` | Baseball Savant | exit velo / barrel rate allowed |
 | `GET /api/savant/batting/expected?season=&min_pa=` | Baseball Savant | xBA / xSLG / xwOBA |
@@ -54,8 +56,8 @@ frontend/
 
 ## Frontend features
 
-- Tabs for Standings, Batting, Pitching, cWAR, Exit Velo/Barrels, Expected Stats (the last two
-  toggle between batting and pitching leaders).
+- Tabs for Standings, Batting, Pitching, cWAR, fWAR (Bat), fWAR (Pit), Exit Velo/Barrels,
+  Expected Stats (the last two toggle between batting and pitching leaders).
 - Player name search, team filter, and a min-PA/min-IP/min-BBE threshold per tab.
 - Click any column header to sort; click again to reverse direction.
 - Results are cached client-side per (tab, season, filter) combination, so switching tabs
@@ -93,16 +95,64 @@ column `GB/FB`, but it's actually GB% (a rate, 0-1), not a ratio — confirmed b
 extreme groundball pitchers (e.g. submarine sinkerballer Tyler Rogers) against the values. Treat
 it as GB%, not `GB/(FB)`.
 
-## Why not FanGraphs?
+## fWAR: FanGraphs-methodology WAR, for batters and pitchers
+
+Unlike cWAR (a deliberately different metric, above), `fWAR` follows FanGraphs' own published
+WAR formulas (`backend/app/fwar_batting.py`, `backend/app/fwar_pitching.py`):
+
+- **Batting**: wOBA is built from Baseball-Reference counting stats and that season's Guts
+  linear weights (`backend/app/guts.py`), then converted to wRAA, adjusted for park and league,
+  and combined with baserunning, fielding, and positional value plus a replacement-level bump
+  — the same shape as [FanGraphs' position-player WAR](https://library.fangraphs.com/war/war-position-players/).
+- **Pitching**: FIP (using a real per-season FIP constant, not a self-derived one) is scaled to
+  a runs-allowed basis, park-adjusted, and converted to wins using FanGraphs' dynamic
+  runs-per-win and starter/reliever-specific replacement level — following
+  [FanGraphs' pitcher WAR formula](https://library.fangraphs.com/war/calculating-war-pitchers/).
+
+**Where the numbers come from, and why this is an approximation, not a bit-exact replica:**
+
+- The wOBA linear weights, FIP constant, and runs-per-win in `guts.py` are hand-transcribed
+  from FanGraphs' [Guts! page](https://www.fangraphs.com/guts.aspx?type=cn) — pybaseball has no
+  API for these, so they need updating there once FanGraphs publishes a new season's numbers.
+- Park factors and positional value come from Baseball-Reference's daily WAR files
+  (`pb.bwar_bat` / `pb.bwar_pitch`) rather than FanGraphs' own park factors or per-1350-innings
+  positional table — those aren't available through pybaseball, but bref publishes its own
+  version of each, updated daily in-season, which this app reuses as a close public stand-in.
+- **Fielding value** uses real Statcast metrics, not bref's: Outs Above Average
+  (`fielding_runs_prevented`, from Baseball Savant's OAA leaderboard, summed across every
+  position a player fielded) for everyone except catchers, and catcher framing runs (`rv_tot`,
+  from Baseball Savant's [catcher framing leaderboard](https://baseballsavant.mlb.com/leaderboard/catcher-framing))
+  for catchers — Statcast doesn't compute OAA for the catcher position. Neither is FanGraphs'
+  own UZR (a proprietary Sports Info Solutions metric with no free source anywhere), but both
+  are real, modern, radar/tracking-based public metrics, arguably a better fielding signal than
+  bref's own defensive-runs estimate. Anyone Statcast doesn't cover (e.g. a pitcher's rare plate
+  appearance) falls back to bref's `runs_field`.
+- **Baserunning value (BsR)** is wSB, computed here from FanGraphs' actual public formula (SB/CS
+  times this season's Guts run values, above a league-average baserunner's expected value with
+  the same opportunities), plus bref's `runs_dp` (double-play avoidance, a distinct component).
+  FanGraphs' own BsR also includes UBR — credit for taking extra bases, tagging up, etc. — which
+  needs proprietary video-review data with no public source; that piece is omitted rather than
+  approximated, since bref's all-in-one baserunning number bundles SB value together with UBR in
+  a way that can't be cleanly separated, and reusing it alongside our own wSB would double-count
+  the stolen-base portion.
+- Two further simplifications on the pitching side: standard FIP is used instead of FanGraphs'
+  "ifFIP" (folds in infield fly balls, which bref only exposes as a rate, not a raw count), and
+  the reliever leverage-index regression and final league-wide calibration correction are both
+  omitted (game leverage index isn't available via pybaseball, and the correction doesn't
+  change player-to-player rankings).
+
+In practice these land close to FanGraphs' own published fWAR for a given season, but expect
+small differences rather than an exact match.
+
+## Why not FanGraphs directly?
 
 `pybaseball.batting_stats` / `pitching_stats` scrape FanGraphs' leaderboard pages, which are
 now behind Cloudflare bot protection — plain scraping gets a 403, and the harder version of
 the challenge is an interactive CAPTCHA that isn't worth automating around. This app uses
 Baseball-Reference (`batting_stats_bref` / `pitching_stats_bref`) for season leaderboards
-instead, which pybaseball can still reach directly. If you want FanGraphs-specific numbers
-(fWAR, their pitch-arsenal stats), the practical option is exporting a CSV from FanGraphs
-yourself (their leaderboard pages have an "Export Data" button) and loading it manually —
-not something this app automates.
+instead, which pybaseball can still reach directly. That's also why `fWAR` above is a
+same-methodology reproduction built from bref + Guts constants rather than FanGraphs' own
+published number — there's no way to pull their number directly.
 
 ## Data quirks worth knowing
 
