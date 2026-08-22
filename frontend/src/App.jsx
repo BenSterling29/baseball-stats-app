@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const CURRENT_YEAR = new Date().getFullYear()
@@ -32,12 +32,48 @@ const EXPECTED_COLS = {
   pitching: ['last_name, first_name', 'pa', 'bip', 'ba', 'est_ba', 'slg', 'est_slg', 'woba', 'est_woba', 'era', 'xera'],
 }
 
+// Per-tab filtering rules: which column holds the player's name (for search),
+// which holds the team (for the team dropdown, when the data has one), and
+// which numeric column the "min" threshold applies to. `serverParam` means
+// the threshold is sent to the backend (it controls the SQL-side qualifier
+// pybaseball applies) instead of just hiding rows client-side.
+const FILTER_CONFIG = {
+  batting: { nameField: 'Name', teamField: 'Tm', minField: 'PA', minLabel: 'Min PA', minDefault: 0 },
+  pitching: { nameField: 'Name', teamField: 'Tm', minField: 'IP', minLabel: 'Min IP', minDefault: 0 },
+  exitvelo: { nameField: 'last_name, first_name', teamField: null, minField: 'attempts', minLabel: 'Min BBE', minDefault: 50, serverParam: 'min_bbe' },
+  expected: { nameField: 'last_name, first_name', teamField: null, minField: 'pa', minLabel: 'Min PA', minDefault: 50, serverParam: 'min_pa' },
+}
+
 function columnsFor(tab, side) {
   if (tab === 'batting') return BATTING_COLS
   if (tab === 'pitching') return PITCHING_COLS
   if (tab === 'exitvelo') return EXITVELO_COLS
   if (tab === 'expected') return EXPECTED_COLS[side]
   return []
+}
+
+function buildCacheKey(tab, side, season, minValue) {
+  const cfg = FILTER_CONFIG[tab]
+  let key = SIDED_TABS.has(tab) ? `${tab}:${side}` : tab
+  key += `:${season}`
+  if (cfg?.serverParam) key += `:${minValue}`
+  return key
+}
+
+function buildUrl(tab, side, season, minValue) {
+  const cfg = FILTER_CONFIG[tab]
+  const params = new URLSearchParams({ season })
+  if (cfg?.serverParam) params.set(cfg.serverParam, minValue)
+  return `${ENDPOINTS[tab](side)}?${params.toString()}`
+}
+
+function compareValues(a, b) {
+  const an = Number(a)
+  const bn = Number(b)
+  if (a !== null && b !== null && a !== '' && b !== '' && !Number.isNaN(an) && !Number.isNaN(bn)) {
+    return an - bn
+  }
+  return String(a ?? '').localeCompare(String(b ?? ''))
 }
 
 function StandingsTable({ divisions }) {
@@ -64,14 +100,21 @@ function StandingsTable({ divisions }) {
   )
 }
 
-function StatsTable({ rows, columns }) {
+function StatsTable({ rows, columns, sortField, sortDir, onSort }) {
   if (!rows) return <p>Loading...</p>
-  if (!rows.length) return <p>No qualifying players found.</p>
+  if (!rows.length) return <p>No players match the current filters.</p>
   return (
     <div className="table-scroll">
       <table className="stats-table">
         <thead>
-          <tr>{columns.map((col) => <th key={col}>{col}</th>)}</tr>
+          <tr>
+            {columns.map((col) => (
+              <th key={col} className="sortable" onClick={() => onSort(col)}>
+                {col}
+                {sortField === col && <span className="sort-arrow">{sortDir === 'asc' ? ' ▲' : ' ▼'}</span>}
+              </th>
+            ))}
+          </tr>
         </thead>
         <tbody>
           {rows.map((row, i) => (
@@ -90,19 +133,71 @@ function App() {
   const [cache, setCache] = useState({})
   const [error, setError] = useState(null)
 
-  const cacheKey = `${tab}:${side}:${season}`
+  const [search, setSearch] = useState('')
+  const [teamFilter, setTeamFilter] = useState('ALL')
+  const [minValue, setMinValue] = useState(0)
+  const [sort, setSort] = useState({ field: null, dir: 'asc' })
+
+  const cfg = FILTER_CONFIG[tab]
+
+  // Reset filters when switching tabs, since columns/fields differ per tab.
+  useEffect(() => {
+    setSearch('')
+    setTeamFilter('ALL')
+    setSort({ field: null, dir: 'asc' })
+    setMinValue(cfg?.minDefault ?? 0)
+  }, [tab])
+
+  const cacheKey = buildCacheKey(tab, side, season, minValue)
 
   useEffect(() => {
     if (cache[cacheKey] !== undefined) return
     setError(null)
-    const endpoint = ENDPOINTS[tab](side)
-    fetch(`${endpoint}?season=${season}`)
+    fetch(buildUrl(tab, side, season, minValue))
       .then((r) => r.json())
       .then((data) => setCache((prev) => ({ ...prev, [cacheKey]: data })))
       .catch((e) => setError(String(e)))
-  }, [cacheKey, tab, side, season])
+  }, [cacheKey, tab, side, season, minValue])
 
   const data = cache[cacheKey]
+
+  // Players traded mid-season get one bref row with a combined "Arizona,Cincinnati"
+  // style team string, so team options/filtering need to split on comma rather
+  // than treat that string as a single team.
+  const teamOptions = useMemo(() => {
+    if (!data || !cfg?.teamField) return []
+    const teams = data.flatMap((r) => String(r[cfg.teamField] ?? '').split(',').map((t) => t.trim()))
+    return [...new Set(teams.filter(Boolean))].sort()
+  }, [data, cfg])
+
+  const displayRows = useMemo(() => {
+    if (!data || tab === 'standings') return data
+    let rows = data
+    if (search.trim()) {
+      const q = search.trim().toLowerCase()
+      rows = rows.filter((r) => String(r[cfg.nameField] ?? '').toLowerCase().includes(q))
+    }
+    if (cfg.teamField && teamFilter !== 'ALL') {
+      rows = rows.filter((r) => String(r[cfg.teamField] ?? '').split(',').map((t) => t.trim()).includes(teamFilter))
+    }
+    if (!cfg.serverParam && minValue) {
+      rows = rows.filter((r) => Number(r[cfg.minField]) >= Number(minValue))
+    }
+    if (sort.field) {
+      rows = [...rows].sort((a, b) => {
+        const cmp = compareValues(a[sort.field], b[sort.field])
+        return sort.dir === 'asc' ? cmp : -cmp
+      })
+    }
+    return rows
+  }, [data, tab, cfg, search, teamFilter, minValue, sort])
+
+  const handleSort = (field) => {
+    setSort((prev) => ({
+      field,
+      dir: prev.field === field && prev.dir === 'asc' ? 'desc' : 'asc',
+    }))
+  }
 
   return (
     <div className="app">
@@ -134,12 +229,44 @@ function App() {
         )}
       </div>
 
+      {tab !== 'standings' && (
+        <div className="filters">
+          <input
+            type="text"
+            placeholder="Search player..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {cfg.teamField && (
+            <select value={teamFilter} onChange={(e) => setTeamFilter(e.target.value)}>
+              <option value="ALL">All teams</option>
+              {teamOptions.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+          )}
+          <label>
+            {cfg.minLabel}:{' '}
+            <input
+              type="number"
+              value={minValue}
+              onChange={(e) => setMinValue(Number(e.target.value))}
+            />
+          </label>
+          {displayRows && <span className="result-count">{displayRows.length} players</span>}
+        </div>
+      )}
+
       {error && <p className="error">Error: {error}</p>}
 
       {tab === 'standings' ? (
         <StandingsTable divisions={data} />
       ) : (
-        <StatsTable rows={data} columns={columnsFor(tab, side)} />
+        <StatsTable
+          rows={displayRows}
+          columns={columnsFor(tab, side)}
+          sortField={sort.field}
+          sortDir={sort.dir}
+          onSort={handleSort}
+        />
       )}
     </div>
   )

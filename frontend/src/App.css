@@ -28,8 +28,52 @@
   border-color: #646cff;
 }
 
+.filters {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.filters input[type='text'] {
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: transparent;
+  color: inherit;
+  min-width: 180px;
+}
+
+.filters select,
+.filters input[type='number'] {
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: #1a1a1a;
+  color: inherit;
+}
+
+.result-count {
+  color: #888;
+  font-size: 0.85rem;
+}
+
 .table-scroll {
   overflow-x: auto;
+}
+
+.stats-table th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.stats-table th.sortable:hover {
+  background: #333;
+}
+
+.sort-arrow {
+  color: #646cff;
 }
 
 .standings-grid {
