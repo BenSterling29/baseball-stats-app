@@ -79,10 +79,30 @@ divisions without it) won't shrink to fit; it overflows into the neighboring gri
 instead of scrolling, which reads as broken/overlapping cells and missing data even though
 every row is actually present. See `.standings-grid > .table-scroll` in `App.css`.
 
-## No tests currently
+## Data fetching / error handling
 
-Verify changes by running both dev servers and checking in a browser — there's no test suite
-or CI to lean on yet.
+`App.jsx` keeps two per-cache-key maps: `cache` (successful responses) and `errors` (failed
+ones). A key present in either is never refetched; the error view's Retry button just deletes
+the key from `errors`, which re-arms the fetch effect. Fetches check `res.ok` and surface the
+backend's JSON `detail` message — don't add a fetch that stores a non-2xx body in `cache`, or
+the table code will try to render an error object as rows.
+
+Two input-to-fetch guards worth keeping intact:
+
+- The season box commits to state only when the value parses as a real season
+  (1871..current+1, matching the backend's validation) — a half-typed year never fires a fetch.
+- Server-side min filters (the Savant tabs' `serverParam` config) go through a ~400ms debounce
+  (`useDebouncedValue`) before hitting the cache key/URL, so typing "100" doesn't fetch
+  min=1, min=10, min=100. Client-side min filters stay live (no fetch involved).
+
+Sorting: the first click on a numeric column sorts descending (leaders first); text columns
+start ascending; a second click flips direction.
+
+## No frontend tests currently
+
+Verify frontend changes by running both dev servers and checking in a browser — the backend's
+math modules have a pytest suite (`backend/tests/`), but there's no frontend test suite or CI
+to lean on yet.
 
 ## Documenting your own changes
 

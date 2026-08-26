@@ -2,6 +2,27 @@ import { useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const CURRENT_YEAR = new Date().getFullYear()
+// Matches the backend's season validation (routers/stats.py); a partially
+// typed year ("2", "20", "202") stays out of this range, so no fetch fires
+// until the input holds a real season.
+const MIN_SEASON = 1871
+const MAX_SEASON = CURRENT_YEAR + 1
+
+function isValidSeason(value) {
+  return Number.isInteger(value) && value >= MIN_SEASON && value <= MAX_SEASON
+}
+
+// Delays propagating a value until the user stops typing, so numeric filter
+// inputs that drive server-side fetches (Min BBE / Min PA) don't fire a
+// request per keystroke ("100" fetching min=1, then min=10, then min=100).
+function useDebouncedValue(value, delayMs = 400) {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(value), delayMs)
+    return () => clearTimeout(t)
+  }, [value, delayMs])
+  return debounced
+}
 
 const TABS = [
   { key: 'standings', label: 'Standings' },
@@ -33,7 +54,7 @@ const ENDPOINTS = {
 
 const BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'AB', 'R', 'H', 'HR', 'RBI', 'SB', 'BA', 'OBP', 'SLG', 'OPS']
 const PITCHING_COLS = ['Name', 'Tm', 'W', 'L', 'ERA', 'G', 'GS', 'SV', 'IP', 'SO', 'WHIP', 'SO9']
-const CWAR_COLS = ['Name', 'Tm', 'IP', 'ERA', 'FIP', 'xERA', 'GB%', 'FB%', 'PU%', 'cWAR']
+const CWAR_COLS = ['Name', 'Tm', 'IP', 'ERA', 'FIP', 'rFIP', 'xERA', 'GB%', 'FB%', 'PU%', 'PF', 'cWAR']
 const FWAR_BATTING_COLS = ['Name', 'Tm', 'G', 'PA', 'wOBA', 'wRAA', 'BsR', 'Fld', 'Pos', 'fWAR']
 const FWAR_PITCHING_COLS = ['Name', 'Tm', 'G', 'GS', 'IP', 'ERA', 'FIP', 'PF', 'fWAR']
 const BWAR_PITCHING_COLS = ['Name', 'Tm', 'G', 'GS', 'IP', 'ERA', 'RA9', 'PF', 'bWAR']
@@ -131,7 +152,7 @@ function StandingsTable({ divisions }) {
 // JSON drops trailing zeros (round(2.50, 2) serializes as 2.5), which makes
 // WAR-style columns render raggedly next to each other -- fix the display
 // width here rather than trying to force it through JSON serialization.
-const COLUMN_DECIMALS = { fWAR: 1, cWAR: 2, bWAR: 1, WAR_spread: 2, wOBA: 3, wRAA: 1, BsR: 1, Fld: 1, Pos: 1, FIP: 2, RA9: 2, PF: 3 }
+const COLUMN_DECIMALS = { fWAR: 1, cWAR: 2, bWAR: 1, WAR_spread: 2, wOBA: 3, wRAA: 1, BsR: 1, Fld: 1, Pos: 1, FIP: 2, rFIP: 2, RA9: 2, PF: 3 }
 
 function formatCell(col, val) {
   if (val === null || val === undefined || val === '') return ''
@@ -168,9 +189,12 @@ function StatsTable({ rows, columns, sortField, sortDir, onSort }) {
 function App() {
   const [tab, setTab] = useState('standings')
   const [side, setSide] = useState('batting')
+  // The raw input string and the committed season are separate so a
+  // half-typed year never becomes a fetch (see isValidSeason).
+  const [seasonInput, setSeasonInput] = useState(String(CURRENT_YEAR))
   const [season, setSeason] = useState(CURRENT_YEAR)
   const [cache, setCache] = useState({})
-  const [error, setError] = useState(null)
+  const [errors, setErrors] = useState({})
 
   const [search, setSearch] = useState('')
   const [teamFilter, setTeamFilter] = useState('ALL')
@@ -187,18 +211,45 @@ function App() {
     setMinValue(cfg?.minDefault ?? 0)
   }, [tab])
 
-  const cacheKey = buildCacheKey(tab, side, season, minValue)
+  const handleSeasonInput = (value) => {
+    setSeasonInput(value)
+    const parsed = Number(value)
+    if (isValidSeason(parsed)) setSeason(parsed)
+  }
+
+  // Server-side min filters (Savant tabs) refetch on change, so debounce
+  // them; client-side ones filter locally and can stay live.
+  const debouncedMin = useDebouncedValue(minValue)
+  const fetchMin = cfg?.serverParam ? debouncedMin : minValue
+
+  const cacheKey = buildCacheKey(tab, side, season, fetchMin)
 
   useEffect(() => {
-    if (cache[cacheKey] !== undefined) return
-    setError(null)
-    fetch(buildUrl(tab, side, season, minValue))
-      .then((r) => r.json())
+    if (cache[cacheKey] !== undefined || errors[cacheKey] !== undefined) return
+    fetch(buildUrl(tab, side, season, fetchMin))
+      .then(async (r) => {
+        if (!r.ok) {
+          let detail = `HTTP ${r.status}`
+          try {
+            const body = await r.json()
+            if (body?.detail) detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail)
+          } catch { /* non-JSON error body; keep the status line */ }
+          throw new Error(detail)
+        }
+        return r.json()
+      })
       .then((data) => setCache((prev) => ({ ...prev, [cacheKey]: data })))
-      .catch((e) => setError(String(e)))
-  }, [cacheKey, tab, side, season, minValue])
+      .catch((e) => setErrors((prev) => ({ ...prev, [cacheKey]: String(e.message ?? e) })))
+  }, [cacheKey, tab, side, season, fetchMin])
 
   const data = cache[cacheKey]
+  const error = errors[cacheKey]
+  // Clearing a key's error re-arms the fetch effect above for that key.
+  const retry = () => setErrors((prev) => {
+    const next = { ...prev }
+    delete next[cacheKey]
+    return next
+  })
 
   // Players traded mid-season get one bref row with a combined "Arizona,Cincinnati"
   // style team string, so team options/filtering need to split on comma rather
@@ -232,10 +283,18 @@ function App() {
   }, [data, tab, cfg, search, teamFilter, minValue, sort])
 
   const handleSort = (field) => {
-    setSort((prev) => ({
-      field,
-      dir: prev.field === field && prev.dir === 'asc' ? 'desc' : 'asc',
-    }))
+    setSort((prev) => {
+      if (prev.field === field) {
+        return { field, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+      }
+      // First click on a numeric column sorts descending (leaders first);
+      // text columns (names, teams) still start ascending.
+      const sample = (Array.isArray(data) ? data : []).find(
+        (r) => r[field] !== null && r[field] !== undefined && r[field] !== ''
+      )?.[field]
+      const numeric = sample !== undefined && !Number.isNaN(Number(sample))
+      return { field, dir: numeric ? 'desc' : 'asc' }
+    })
   }
 
   return (
@@ -246,8 +305,10 @@ function App() {
           Season:{' '}
           <input
             type="number"
-            value={season}
-            onChange={(e) => setSeason(Number(e.target.value))}
+            min={MIN_SEASON}
+            max={MAX_SEASON}
+            value={seasonInput}
+            onChange={(e) => handleSeasonInput(e.target.value)}
           />
         </label>
         <nav className="tabs">
@@ -294,9 +355,11 @@ function App() {
         </div>
       )}
 
-      {error && <p className="error">Error: {error}</p>}
-
-      {tab === 'standings' ? (
+      {error ? (
+        <p className="error">
+          Error: {error} <button onClick={retry}>Retry</button>
+        </p>
+      ) : tab === 'standings' ? (
         <StandingsTable divisions={data} />
       ) : (
         <StatsTable

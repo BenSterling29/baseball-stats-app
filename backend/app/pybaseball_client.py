@@ -143,8 +143,9 @@ def _pitcher_cwar_df(season: int):
     # pitchers as possible get a real contact-quality read instead of
     # falling back to FIP-only.
     expected_df = pb.statcast_pitcher_expected_stats(season, minPA=1)
-    df = cwar.compute(pitching_df, expected_df)
     bwar_pitch_df = _bwar_pitch_for_season(season)
+    park_df = park_factors.from_bwar_pitch(bwar_pitch_df)
+    df = cwar.compute(pitching_df, expected_df, bwar_pitch_df, park_df)
     return team_ids.attach(df, bwar_pitch_df)
 
 

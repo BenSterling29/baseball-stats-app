@@ -18,10 +18,7 @@ a deliberately different, xERA-blended metric and is untouched by this.
 """
 import pandas as pd
 
-from app import park_factors
-
-REPLACEMENT_WPG_RELIEVER = 0.03  # FanGraphs: gap between avg (.500) and replacement (.470) win% for RP
-REPLACEMENT_WPG_STARTER = 0.12   # FanGraphs: gap between avg (.500) and replacement (.380) win% for SP
+from app import park_factors, pitcher_war_chassis
 
 
 def compute(pitching_df, bwar_pitch_df, park_df, guts_for_season):
@@ -56,21 +53,7 @@ def compute(pitching_df, bwar_pitch_df, park_df, guts_for_season):
     df = df.merge(team_lookup, left_on="mlbID", right_on="mlb_ID", how="left")
     df["PF"] = park_factors.attach(df, park_df, team_col="team_ID")
 
-    park_fip_r9 = fip_r9 / df["PF"]
-    raa_p9 = league_fip_r9 - park_fip_r9
-
-    # Dynamic runs-per-win: a pitcher's own innings/game and park-adjusted
-    # run environment shift how many runs one win is worth for him, since
-    # (unlike a hitter) a pitcher directly shapes the game's run environment.
-    ip_per_g = df["IP"] / df["G"]
-    dynamic_rpw = (((18 - ip_per_g) * league_fip_r9 + ip_per_g * park_fip_r9) / 18 + 2) * 1.5
-
-    wins_above_avg_per_g = raa_p9 / dynamic_rpw
-    gs_share = (df["GS"] / df["G"]).clip(0, 1).fillna(0)
-    replacement_wpg = REPLACEMENT_WPG_RELIEVER * (1 - gs_share) + REPLACEMENT_WPG_STARTER * gs_share
-    wins_above_rep_per_g = wins_above_avg_per_g + replacement_wpg
-
-    df["fWAR"] = (wins_above_rep_per_g * df["IP"] / 9).round(1)
+    df["fWAR"] = pitcher_war_chassis.war_from_rate(df, fip_r9, league_fip_r9, df["PF"]).round(1)
     df["FIP"] = df["FIP"].round(2)
     df["PF"] = df["PF"].round(3)
 

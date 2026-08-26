@@ -10,15 +10,36 @@ uvicorn app.main:app --reload   # http://localhost:8000
 ## Structure
 
 - `app/main.py` — FastAPI app, CORS (only allows `http://localhost:5173`), mounts the router.
+  Also a catch-all exception handler that turns unhandled errors (usually upstream scrape
+  failures) into a JSON 502 with a `detail` message, so the frontend can display something
+  useful instead of a bare "Internal Server Error" text body it can't parse.
 - `app/pybaseball_client.py` — the only place that imports `pybaseball` or calls `pb.*`.
   Every function returns plain `list[dict]` (or `list[list[dict]]` for standings), never a
   DataFrame — routers should never touch pandas.
 - `app/routers/stats.py` — thin HTTP layer. Each route just parses query params and calls a
   `pybaseball_client` function. Keep it that way; put scraping/data logic in the client module.
+  Query params are bounds-checked here (`season` 1871–2100, `days_back` ≤ 30, `min_*` ≥ 0) —
+  pybaseball fails slowly and confusingly on nonsense inputs, so reject them at the HTTP layer.
 - `app/cwar.py` — pure-pandas math for the custom pitcher WAR metric (no `pybaseball` import;
   takes DataFrames in, returns a DataFrame with added columns). Called from
   `pybaseball_client.get_pitcher_cwar`, which does the actual `pb.*` fetching/merging. See
-  the README's "cWAR" section for the formula and rationale.
+  the README's "cWAR" section for the formula and rationale. Two things here are load-bearing
+  and easy to break:
+  - `cwar.rfip()` is a **shared** helper — `compute()` and `scripts/tune_cwar_weights.py` both
+    call it, so the weights stay fitted on exactly the rate the runtime blends. Don't inline
+    that math into either caller.
+  - The batted-ball adjustment is scaled by `(1 - bip_reliability)` on purpose. xERA already
+    encodes batted-ball mix (it's built from exit velocity *and* launch angle), so applying
+    both at full strength double-counts — measured as worse than no adjustment on 4/4
+    season-pair folds. Don't "fix" it back to unconditional.
+- `scripts/tune_cwar_weights.py` — offline, manually-run, read-only analysis (NOT imported by
+  the app). Fits cWAR's rFIP/xERA blend weights against next-season park-adjusted ERA with
+  leave-one-season-pair-out validation, and reports the batted-ball diagnostics. Run it before
+  changing `FIP_WEIGHT_BASE`/`CONTACT_WEIGHT_BASE`, and paste its constants block only if the
+  refit wins consistently across folds (as of the 2021-2025 pairs it does not — the current
+  weights are validated, not merely guessed). It fetches through the same disk cache the app
+  uses; reuse `pybaseball_client._bwar_pitch_for_season` rather than calling `pb.bwar_pitch`
+  per season, or you'll refetch a 100k-row file each time.
 - `app/guts.py` — static, hand-transcribed per-season FanGraphs "Guts!" constants (wOBA linear
   weights, FIP constant, runs-per-win). pybaseball has no API for these; add a new season's row
   once FanGraphs publishes it.
@@ -31,6 +52,13 @@ uvicorn app.main:app --reload   # http://localhost:8000
   third distinct metric alongside cWAR and fWAR. Shares `park_factors.py` with fWAR (including
   `park_factors.primary_team`, the one-row-per-stint team lookup both modules use). See the
   README's "bWAR" section.
+- `app/pitcher_war_chassis.py` — the shared rate-to-WAR conversion (park adjustment, dynamic
+  runs-per-win, starter/reliever replacement split) used by all three pitcher WAR modules.
+  Each metric supplies its own believed runs-allowed rate (RA9 / FIP-on-RA9 / the cWAR blend);
+  the chassis does the rest. Keep it that way — a metric with its own replacement level or
+  park convention silently breaks the WAR Compare tab's comparability (cWAR originally had a
+  flat 1.13× replacement factor and no park adjustment, which made it read ~35% low league-wide
+  and gave Coors pitchers absurdly negative values).
 - `app/war_compare.py` — pure merge (no new math) of bWAR/fWAR/cWAR's already-computed output
   onto one row per pitcher, for the frontend's "WAR Compare" tab. Called from
   `pybaseball_client.get_pitcher_war_compare`.
@@ -71,6 +99,11 @@ uvicorn app.main:app --reload   # http://localhost:8000
   the values (e.g. submarine sinkerballer Tyler Rogers tops the leaderboard at 0.64, which
   only makes sense as a rate). `cwar.py` derives FB% as `1 - LD - PU - GB%`; don't re-derive
   it as `GB% / (1 + ratio)` elsewhere, it isn't a ratio.
+- **`pitching_stats_bref` has `BF` (batters faced)**, which is what makes a real balls-in-play
+  count possible: `BIP = BF - SO - BB - HBP - HR` (sacrifices/interference are a rounding error
+  at this scale). `cwar.rfip` uses it with `FB%` to get each pitcher's fly-ball count for the
+  HR/FB regression. There's no direct batted-ball *count* column — only rates — so this is the
+  way to get one.
 - **`pitching_stats_bref` returns a 1-based DataFrame index**, not the usual 0-based
   `RangeIndex`. If you compute a pandas `Series` from it and later combine that Series with a
   DataFrame that's been through a `merge()` (which resets the index), pandas will silently
@@ -105,6 +138,22 @@ uvicorn app.main:app --reload   # http://localhost:8000
   catcher position) — `pybaseball_client._get_fielding_oaa` loops positions 3-9 (1B through RF)
   and sums `fielding_runs_prevented` per player across whichever ones they played, the same way
   bref sums `runs_field` across a multi-position player's stints.
+
+## Tests
+
+`tests/` covers the pure-pandas math modules (cwar, fwar, bwar, war_compare, team_ids,
+park_factors, guts) plus `_records`/`_fix_mojibake`, using small synthetic DataFrames that
+deliberately reproduce the bref quirks above (1-based index, string-typed numbers,
+player-team-stint rows, `GB/FB`-is-actually-GB%). No network, runs in ~1s:
+
+```bash
+./venv/bin/python -m pytest tests/
+```
+
+When you touch a formula module, run these — and if you fix a math bug, add a regression test
+the way `test_cwar.test_blend_weights_are_convex` pins the FIP/xERA weight-sum bug (the base
+weights 0.70 + 0.25 only sum to 0.95; they must be normalized to a true convex combination or
+every blendedERA deflates ~5% and all cWAR values inflate).
 
 ## Conventions
 

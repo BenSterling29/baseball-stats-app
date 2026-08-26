@@ -24,6 +24,13 @@ npm run dev
 
 The frontend dev server proxies `/api/*` to the backend, so just open http://localhost:5173.
 
+**Backend tests** (pure-pandas math modules, no network):
+
+```bash
+cd backend
+./venv/bin/python -m pytest tests/
+```
+
 ## Project layout
 
 ```
@@ -76,21 +83,85 @@ velocity allowed) both show real year-to-year signal, just noisier than K%/BB%.
 
 `cWAR` (`backend/app/cwar.py`) blends three things instead of just the FIP three:
 
-1. **FIP core** (~70% weight) — the standard `(13·HR + 3·(BB+HBP) − 2·K)/IP` formula, using a
-   FIP constant computed live from that season's league totals rather than a hardcoded one.
-2. **Statcast xERA** (~25% weight, from `/api/savant/pitching/expected`) — captures contact
+1. **rFIP core** (~74% weight) — the standard `(13·HR + 3·(BB+HBP) − 2·K)/IP` formula, using a
+   FIP constant computed live from that season's league totals rather than a hardcoded one,
+   but with the HR term **regressed toward league HR/FB** first (see below).
+2. **Statcast xERA** (~26% weight, from `/api/savant/pitching/expected`) — captures contact
    quality (exit velocity + launch angle allowed) that FIP ignores entirely. This weight
-   shrinks toward the FIP core for pitchers with few tracked batted-ball events, since
+   shrinks toward the rFIP core for pitchers with few tracked batted-ball events, since
    contact-quality metrics need a bigger sample to stabilize than K/BB do.
 3. **A small batted-ball-mix adjustment** — rewards ground-ball/pop-up tendencies (derived
    from bref's `GB/FB`, `LD`, `PU` columns), which are far more repeatable than raw BABIP and
-   otherwise invisible to FIP.
+   otherwise invisible to FIP. It applies **only in proportion to how little xERA is trusted**
+   for that pitcher (see below).
 
-The blended runs-allowed rate is converted to wins above replacement using a league-average
-ERA computed live from the same season's data, a standard replacement-level factor (1.13x
-league average), and the usual ~10 runs = 1 win approximation. All the weights and
-coefficients are named constants at the top of `cwar.py` — they're research-informed starting
-points, not statistically fitted, so treat them as tunable.
+The rFIP/xERA weights are normalized to a true convex combination (they always sum to exactly
+1, preserving the ~70:25 ratio) — blendedERA is an ERA-scale estimate, so a weight sum below 1
+would deflate it outright rather than reweight it.
+
+### rFIP: regressing the noisiest FIP input
+
+HR/FB is by far the least repeatable of FIP's three inputs — the entire reason xFIP exists —
+so a pitcher's HR total is regressed toward what his own fly-ball count would produce at the
+league HR/FB rate. Fly balls come from `FB% × (BF − SO − BB − HBP − HR)`; full trust needs
+`FB_FULL_TRUST = 400` fly balls, so a 180-IP starter (~200 FB) keeps about half his own HR
+total and borrows the rest from league rate. Unlike xFIP, which discards the actual HR total
+outright, this keeps real signal for pitchers with the sample to back it. The regression is
+league-total-preserving, so it only moves home runs *between* pitchers — league rFIP still
+lands on league ERA. Both `FIP` and `rFIP` are returned so you can see the gap; in 2026 the
+biggest movers are ~±0.9 runs (e.g. Jameson Taillon 6.55 → 5.30).
+
+### Park adjustment applies to rFIP only
+
+The blended rate is converted to WAR on the **same chassis fWAR and bWAR use**
+(`backend/app/pitcher_war_chassis.py`): scaled to an RA9 basis and run through the dynamic
+runs-per-win and starter/reliever replacement-level split. That shared chassis matters —
+before it, cWAR's flat `1.13× league average` replacement level was roughly a *reliever's*
+replacement gap applied to everyone, shortchanging starters ~half their replacement credit and
+leaving league-total cWAR ~35% below the other two metrics; and with no park adjustment at all,
+every Coors pitcher graded out terribly.
+
+cWAR differs from fWAR/bWAR in *where* the park adjustment lands: only the rFIP component is
+divided by the park factor, not the whole blend. rFIP is built from actual outcomes (home runs
+that Coors' altitude helped carry out), so it's park-inflated; xERA is derived from exit
+velocity and launch angle — batted-ball *inputs* the park barely touches — so dividing it too
+would hand extreme-park pitchers a second credit for the same effect. cWAR therefore hands the
+chassis an already-park-adjusted rate with a neutral PF, while fWAR/bWAR correctly let the
+chassis divide their fully outcome-based rates. Net effect on WAR Compare: the spread between
+the three metrics now reflects only rate-stat philosophy (RA9 vs FIP vs the blend), never a
+mismatched replacement level or park convention.
+
+### Why the batted-ball adjustment fades as xERA takes over
+
+xERA is built from exit velocity **and launch angle**, so it already encodes batted-ball mix.
+Applying the mix adjustment on top of a full-strength xERA double-counts, and the data says so:
+regressing next-season park-adjusted ERA over the 2021–2025 season pairs, the unconditional
+adjustment was *worse* than none on 4 of 4 folds, monotonically (weighted RMSE 1.0359 none /
+1.0424 half / 1.0519 full). The adjustment is therefore scaled by `(1 − bip_reliability)`, so
+it fades out exactly as xERA takes over and survives only where xERA is absent or weakly
+trusted — pitchers with little tracked batted-ball data, whom that test could not cover.
+
+### Tuning the weights
+
+`backend/scripts/tune_cwar_weights.py` fits the blend weights empirically — regressing
+next-season park-adjusted ERA on that season's rFIP and xERA, with leave-one-season-pair-out
+validation. Run it by hand (it's network-bound and read-only; first run is slow, later runs hit
+pybaseball's disk cache):
+
+```bash
+cd backend
+./venv/bin/python -m scripts.tune_cwar_weights
+```
+
+It prints fitted weights, per-fold RMSE/MAE against the current weights and FIP-only /
+xERA-only / 50-50 baselines, the batted-ball diagnostics above, and a paste-ready constants
+block **only if** the refit beats the current weights consistently across folds.
+
+As of the 2021–2025 pairs it does not: the empirical refit (0.66/0.34) lost on 0/4 folds and
+swung across folds (0.53–0.78), so the hand-picked 70/25 pair stands — now as a *validated*
+choice rather than an untested one. The batted-ball coefficients are deliberately not co-fit
+(xERA already carries that signal, and GB/FB/PU are structurally collinear); they're reported
+as a residual diagnostic instead.
 
 One data quirk worth knowing if you touch this code: pybaseball labels bref's ground-ball-rate
 column `GB/FB`, but it's actually GB% (a rate, 0-1), not a ratio — confirmed by checking known
