@@ -67,8 +67,8 @@ def _current_fip_weight():
 
 def build_features(season):
     """One row per pitcher-season with the same inputs the runtime blends:
-    park-adjusted rFIP, raw xERA, batted-ball rates, and park-adjusted ERA
-    (used as the *target* when this season is the N+1 side of a pair)."""
+    park-adjusted rFIP, raw xERA, the batted-ball adjustment, and
+    park-adjusted ERA (the *target* when this season is the N+1 side)."""
     # 1-based index from bref -> reset before any Series math (AGENTS.md).
     raw = pb.pitching_stats_bref(season).reset_index(drop=True).copy()
     for col in ("IP", "SO", "BB", "HBP", "HR", "ER", "BF"):
@@ -78,15 +78,11 @@ def build_features(season):
     if raw["mlbID"].duplicated().any():
         dupes = int(raw["mlbID"].duplicated().sum())
         print(f"  ! {season}: {dupes} duplicate mlbID rows in bref output; keeping first")
-        raw = raw.drop_duplicates("mlbID")
+        raw = raw.drop_duplicates("mlbID").reset_index(drop=True)
 
     # Same rFIP the runtime blends -- shared helper, so this cannot drift.
     rfip_series, fip_series, _ = cwar.rfip(raw)
     gb_pct, fb_pct = cwar._batted_ball_rates(raw)
-
-    bwar_pitch = pbc._bwar_pitch_for_season(season)
-    park_df = park_factors.from_bwar_pitch(bwar_pitch)
-    team_lookup = park_factors.primary_team(bwar_pitch)
 
     df = pd.DataFrame({
         "mlbID": raw["mlbID"],
@@ -98,6 +94,14 @@ def build_features(season):
         "FB%": fb_pct,
         "PU%": pd.to_numeric(raw.get("PU"), errors="coerce"),
     })
+    # Same batted-ball adjustment the runtime applies (shared helper), and
+    # computed here, on the full league, so its league averages match the
+    # runtime's -- not on the filtered sample built later.
+    df["bb_adj"] = cwar.batted_ball_adjustment(df)
+
+    bwar_pitch = pbc._bwar_pitch_for_season(season)
+    park_df = park_factors.from_bwar_pitch(bwar_pitch)
+    team_lookup = park_factors.primary_team(bwar_pitch)
     df = df.merge(team_lookup, left_on="mlbID", right_on="mlb_ID", how="left")
     df["PF"] = park_factors.attach(df, park_df, team_col="team_ID")
 
@@ -140,7 +144,7 @@ def build_pair(features, year_n, year_next):
     # Drop rather than fill missing xERA: the runtime's fillna(rFIP) fallback
     # is right for scoring a player but would contaminate the regression by
     # smuggling FIP values into the xERA column.
-    df = df.dropna(subset=["rFIP_park", "xERA", "target"])
+    df = df.dropna(subset=["rFIP_park", "xERA", "target", "bb_adj"])
 
     # Harmonic mean of the two IP totals: a pitcher has to be well-measured
     # on BOTH sides of the pair to say much about year-to-year skill.
@@ -153,22 +157,57 @@ def _center(df):
     """Weighted-center target and predictors within one season pair."""
     w = df["w"].to_numpy()
     out = {}
-    for col in ("rFIP_park", "xERA", "target", "GB%", "FB%", "PU%"):
+    for col in ("rFIP_park", "xERA", "target", "bb_adj", "GB%", "FB%", "PU%"):
         v = df[col].to_numpy(dtype=float)
         out[col] = v - np.average(v, weights=w)
     out["w"] = w
     return out
 
 
+# --- Scale-invariant scoring ------------------------------------------------
+#
+# Next-season ERA regresses ~40% toward the mean for everyone, so the best
+# prediction of it is not the blend itself but a *shrunk* blend, s * blend,
+# with s ~0.6. The runtime never needs s -- the WAR chassis centers on the
+# league average -- so what the constants encode is only the blend's
+# *direction* (the rFIP:xERA mix). Scoring every setting at s = 1 would
+# instead reward whichever mix happens to minimize the over-dispersion
+# error, which is not the same as the mix that predicts best. (An earlier
+# version of this script did exactly that, and its "current weights win 0/4
+# folds" verdict was an artifact of it.) So every setting below gets its own
+# best s, fitted on the training folds only, and is then scored on the
+# held-out fold. The comparison is then purely about the mix.
+
+def _direction(c, fip_w, bb_k=0.0):
+    """Centered blend for one pair: the runtime's mix, plus bb_k times the
+    runtime's batted-ball adjustment."""
+    return fip_w * c["rFIP_park"] + (1 - fip_w) * c["xERA"] + bb_k * c["bb_adj"]
+
+
+def _fit_scale(train, fip_w, bb_k=0.0):
+    """Best weighted-least-squares scale s for s * direction, on train only."""
+    num = sum(float(np.sum(c["w"] * c["target"] * _direction(c, fip_w, bb_k))) for c in train)
+    den = sum(float(np.sum(c["w"] * _direction(c, fip_w, bb_k) ** 2)) for c in train)
+    return num / den if den > 0 else 0.0
+
+
+def _score(held, fip_w, bb_k, scale):
+    err = scale * _direction(held, fip_w, bb_k) - held["target"]
+    w = held["w"]
+    rmse = float(np.sqrt(np.average(err ** 2, weights=w)))
+    mae = float(np.average(np.abs(err), weights=w))
+    return rmse, mae
+
+
 def fit_weights(centered_pairs):
     """Weighted, no-intercept, nonnegative least squares of next-season ERA
-    on (rFIP_park, xERA), then normalized to sum to 1.
+    on (rFIP_park, xERA), normalized to sum to 1.
 
-    Returns (fip_weight, xera_weight, raw_coefficient_sum). The raw sum runs
-    well below 1 because every pitcher regresses toward the mean year over
-    year -- that's a global shrinkage the WAR chassis handles by centering on
-    the league average, not something the blend's mix should absorb, so only
-    the *ratio* between the two coefficients is carried over.
+    Returns (fip_weight, xera_weight, raw_coefficient_sum). Normalizing keeps
+    the regression's direction -- the mix with the highest correlation to
+    next-season ERA -- and drops its overall scale, which is exactly the
+    split the scale-invariant scoring above makes. The raw sum (~0.6) is the
+    year-to-year regression to the mean, printed only as a diagnostic.
     """
     a = np.vstack([np.concatenate([c["rFIP_park"] for c in centered_pairs]),
                    np.concatenate([c["xERA"] for c in centered_pairs])]).T
@@ -186,22 +225,24 @@ def fit_weights(centered_pairs):
     return b_fip / total, b_xera / total, total
 
 
-def _wrmse_wmae(centered, fip_w):
-    pred = fip_w * centered["rFIP_park"] + (1 - fip_w) * centered["xERA"]
-    err = pred - centered["target"]
-    w = centered["w"]
-    rmse = float(np.sqrt(np.average(err ** 2, weights=w)))
-    mae = float(np.average(np.abs(err), weights=w))
-    return rmse, mae
+def _print_table(title, rows, value_key):
+    names = list(rows[0][value_key].keys())
+    col = max(14, max(len(n) for n in names) + 2)
+    if title:
+        print(f"\n{title}")
+    print(f"{'pair':<12}{'n':>5}" + "".join(f"{n:>{col}}" for n in names))
+    for r in rows:
+        print(f"{r['pair']:<12}{r['n']:>5}" + "".join(f"{r[value_key][n]:>{col}.4f}" for n in names))
+    means = {n: np.mean([r[value_key][n] for r in rows]) for n in names}
+    print(f"{'MEAN':<12}{'':>5}" + "".join(f"{means[n]:>{col}.4f}" for n in names))
 
 
 def loo_eval(centered_pairs, labels, fitted_all):
-    """Leave-one-season-pair-out: fit on the other pairs, score the held-out
-    one. With only four pairs, a mix that wins pooled but loses on individual
-    folds is overfitting the pooled sample."""
+    """Leave-one-season-pair-out: fit the mix (and every setting's scale) on
+    the other pairs, score the held-out one. With only four pairs, a mix
+    that wins pooled but loses on individual folds is overfitting."""
     current = _current_fip_weight()
-    rows = []
-    fold_weights = []
+    rows, fold_weights = [], []
 
     for i, label in enumerate(labels):
         train = [c for j, c in enumerate(centered_pairs) if j != i]
@@ -210,28 +251,18 @@ def loo_eval(centered_pairs, labels, fitted_all):
         fold_weights.append(fold_fip_w)
 
         settings = {"fitted (LOO)": fold_fip_w, "current": current, **BASELINES}
-        row = {"pair": label, "n": len(held["w"])}
-        for name, w in settings.items():
-            rmse, mae = _wrmse_wmae(held, w)
-            row[f"{name} RMSE"] = rmse
-            row[f"{name} MAE"] = mae
-        rows.append(row)
+        rmse, mae = {}, {}
+        for name, fip_w in settings.items():
+            s = _fit_scale(train, fip_w)
+            rmse[name], mae[name] = _score(held, fip_w, 0.0, s)
+        rows.append({"pair": label, "n": len(held["w"]), "rmse": rmse, "mae": mae})
 
-    table = pd.DataFrame(rows).set_index("pair")
-
-    print("\n" + "=" * 78)
-    print("LEAVE-ONE-SEASON-PAIR-OUT (weighted RMSE of predicted next-season ERA)")
-    print("=" * 78)
-    rmse_cols = [c for c in table.columns if c.endswith("RMSE")]
-    print(table[["n"] + rmse_cols].to_string(
-        float_format=lambda v: f"{v:.4f}", header=[c.replace(" RMSE", "") for c in ["n"] + rmse_cols]
-    ))
-
-    print("\nWeighted MAE:")
-    mae_cols = [c for c in table.columns if c.endswith("MAE")]
-    print(table[mae_cols].to_string(
-        float_format=lambda v: f"{v:.4f}", header=[c.replace(" MAE", "") for c in mae_cols]
-    ))
+    print("\n" + "=" * 86)
+    print("LEAVE-ONE-SEASON-PAIR-OUT: predicting next-season park-adjusted ERA")
+    print("(each setting's scale fitted on the training folds; see _fit_scale)")
+    print("=" * 86)
+    _print_table("Weighted RMSE:", rows, "rmse")
+    _print_table("Weighted MAE:", rows, "mae")
 
     print(f"\nPer-fold fitted rFIP weight: "
           f"{', '.join(f'{lbl}={w:.3f}' for lbl, w in zip(labels, fold_weights))}")
@@ -242,105 +273,92 @@ def loo_eval(centered_pairs, labels, fitted_all):
         print("  ! Wide spread across folds -- the point estimate is unstable.")
         print("    Prefer the fold mean, or keep the current weights.")
 
-    wins = sum(1 for r in rows if r["fitted (LOO) RMSE"] < r["current RMSE"])
-    print(f"\nFolds where fitted beats current: {wins}/{len(rows)}")
+    deltas = [r["rmse"]["fitted (LOO)"] - r["rmse"]["current"] for r in rows]
+    wins = sum(1 for d in deltas if d < 0)
+    print(f"\nFolds where fitted beats current: {wins}/{len(rows)}   "
+          f"(RMSE delta per fold: {', '.join(f'{d:+.4f}' for d in deltas)})")
     return wins, len(rows), fold_weights
 
 
-def batted_ball_residual_check(centered_pairs, fip_w):
-    """Diagnostic only -- deliberately NOT co-fit with the blend weights.
+def batted_ball_joint_fit(centered_pairs, fip_w):
+    """Diagnostic: regress next-season ERA on the blend AND the three
+    batted-ball rates jointly, so the blend's coefficient absorbs the
+    regression-to-the-mean scale. (An earlier version regressed the raw
+    residual y - blend on the rates; that residual carries a -0.4 * blend
+    term which is itself correlated with GB/PU rate, and produced
+    spurious, sign-flipped coefficients.)
 
-    xERA is built from exit velocity AND launch angle, so batted-ball mix is
-    already largely inside it; and GB/FB/PU are structurally collinear (they
-    sum to 1 with LD, and PU barely varies). Throwing them into the main
-    regression would split shared signal arbitrarily between the terms.
-    Instead: does the blend leave any batted-ball-shaped residual behind?
+    Each rate coefficient is divided by the blend's coefficient to express
+    it in the runtime's blend units, comparable to the hand-picked
+    GB/FB/PU coefficients. GB/FB/PU are structurally collinear (they sum to
+    1 with LD) and xERA already carries much of their signal, so treat
+    these as a sanity check, not values to paste in.
     """
-    x = np.vstack([np.concatenate([c[k] for c in centered_pairs])
-                   for k in ("GB%", "FB%", "PU%")]).T
-    resid = np.concatenate([
-        c["target"] - (fip_w * c["rFIP_park"] + (1 - fip_w) * c["xERA"])
-        for c in centered_pairs
-    ])
+    cols = ("GB%", "FB%", "PU%")
+    base = np.concatenate([_direction(c, fip_w) for c in centered_pairs])
+    rates = np.vstack([np.concatenate([c[k] for c in centered_pairs]) for k in cols]).T
+    x = np.column_stack([base, rates])
+    y = np.concatenate([c["target"] for c in centered_pairs])
     w = np.concatenate([c["w"] for c in centered_pairs])
 
-    ok = np.isfinite(x).all(axis=1) & np.isfinite(resid)
-    x, resid, w = x[ok], resid[ok], w[ok]
-
+    ok = np.isfinite(x).all(axis=1) & np.isfinite(y)
+    x, y, w = x[ok], y[ok], w[ok]
     sw = np.sqrt(w)
-    xw, yw = x * sw[:, None], resid * sw
+    xw, yw = x * sw[:, None], y * sw
     coefs, *_ = np.linalg.lstsq(xw, yw, rcond=None)
 
-    # Standard errors from the weighted normal equations.
     dof = max(len(yw) - x.shape[1], 1)
     sigma2 = float(((yw - xw @ coefs) ** 2).sum() / dof)
     try:
         se = np.sqrt(np.diag(sigma2 * np.linalg.inv(xw.T @ xw)))
     except np.linalg.LinAlgError:
-        se = np.full(3, np.nan)
+        se = np.full(x.shape[1], np.nan)
 
+    s = coefs[0]
     # Runtime signs: GB and PU are credits (negative runs), FB is a penalty.
     current = {"GB%": -cwar.GB_RUN_COEF, "FB%": cwar.FB_RUN_COEF, "PU%": -cwar.PU_RUN_COEF}
-    print("\n" + "=" * 78)
-    print("BATTED-BALL RESIDUAL CHECK (diagnostic, not auto-applied)")
-    print("=" * 78)
-    print(f"{'term':<8}{'fitted':>10}{'std err':>10}{'t':>8}   current (runtime)")
-    for i, key in enumerate(("GB%", "FB%", "PU%")):
-        t = coefs[i] / se[i] if se[i] and np.isfinite(se[i]) else float("nan")
-        print(f"{key:<8}{coefs[i]:>10.3f}{se[i]:>10.3f}{t:>8.2f}   {current[key]:+.2f}")
-    print("\nReading this: a fitted coefficient near zero (|t| < 2) means the blend")
-    print("already captures that batted-ball signal -- mostly via xERA -- and the")
-    print("runtime adjustment is double-counting, so it should shrink or go. Same")
-    print("sign and rough magnitude as 'current' means the hand-picked value holds up.")
+    print("\n" + "=" * 86)
+    print("BATTED-BALL JOINT FIT (diagnostic, not auto-applied)")
+    print("=" * 86)
+    print(f"blend coefficient (the regression-to-the-mean scale): {s:.3f}")
+    print(f"{'term':<8}{'coef':>10}{'std err':>10}{'t':>8}{'blend units':>14}   current")
+    for i, key in enumerate(cols, start=1):
+        t = coefs[i] / se[i] if np.isfinite(se[i]) and se[i] > 0 else float("nan")
+        blend_units = coefs[i] / s if s else float("nan")
+        print(f"{key:<8}{coefs[i]:>10.3f}{se[i]:>10.3f}{t:>8.2f}{blend_units:>14.2f}   {current[key]:+.2f}")
+    print("\n|t| < 2 means no detectable batted-ball signal left beyond the blend.")
 
 
-def batted_ball_variant_check(pairs, labels, fip_w):
-    """The decisive version of the diagnostic above: rebuild the runtime's
-    actual batted-ball adjustment (IP-reliability-scaled, real coefficients)
-    and score the blend with it, without it, and at half strength.
+def batted_ball_variant_check(centered_pairs, labels, fip_w):
+    """The decisive batted-ball test. Score the blend with the runtime's
+    batted-ball adjustment (shared helper, league-wide averages) at full,
+    half, and zero strength, each with its own training-fold scale.
 
-    This is what drove the runtime's complementary weighting -- the
-    adjustment is now multiplied by (1 - bip_reliability), so it fades out as
-    xERA takes over. Note the sample here is all bip >= 100, i.e. exactly
-    the full-xERA-trust regime where double-counting is maximal; it says
-    nothing about pitchers with little tracked data, which is precisely the
-    regime the runtime keeps the adjustment for.
+    The sample is all bip >= 100: the full-xERA-trust regime. There the
+    runtime's (1 - bip_reliability) fade makes the adjustment exactly 0, so
+    'none' IS the runtime; 'full' is the old unconditional version.
     """
-    print("\n" + "=" * 78)
-    print("BATTED-BALL ADJUSTMENT, AS ACTUALLY APPLIED (weighted RMSE)")
-    print("=" * 78)
-    print(f"{'pair':<14}{'n':>5}{'full adj':>11}{'half adj':>11}{'no adj':>11}")
+    variants = {"full (old)": 1.0, "half": 0.5, "none (runtime)": 0.0}
+    rows = []
+    for i, label in enumerate(labels):
+        train = [c for j, c in enumerate(centered_pairs) if j != i]
+        held = centered_pairs[i]
+        rmse = {}
+        for name, k in variants.items():
+            s = _fit_scale(train, fip_w, k)
+            rmse[name], _ = _score(held, fip_w, k, s)
+        rows.append({"pair": label, "n": len(held["w"]), "rmse": rmse})
 
-    totals = {"full": [], "half": [], "none": []}
-    for df, label in zip(pairs, labels):
-        w = df["w"].to_numpy()
-        lg = {k: np.average(df[k].fillna(df[k].mean()), weights=df["IP"])
-              for k in ("GB%", "FB%", "PU%")}
-        adj = (-cwar.GB_RUN_COEF * (df["GB%"].fillna(lg["GB%"]) - lg["GB%"])
-               + cwar.FB_RUN_COEF * (df["FB%"].fillna(lg["FB%"]) - lg["FB%"])
-               - cwar.PU_RUN_COEF * (df["PU%"].fillna(lg["PU%"]) - lg["PU%"]))
-        adj = (adj * (df["IP"] / cwar.IP_FULL_TRUST).clip(upper=1).fillna(0)).to_numpy()
+    print("\n" + "=" * 86)
+    print("BATTED-BALL ADJUSTMENT ON TOP OF THE BLEND (weighted RMSE, LOO, own scale)")
+    print("=" * 86)
+    _print_table("", rows, "rmse")
 
-        base = fip_w * df["rFIP_park"].to_numpy() + (1 - fip_w) * df["xERA"].to_numpy()
-        y = df["target"].to_numpy()
-        y_c = y - np.average(y, weights=w)
-
-        scores = {}
-        for name, blend in (("full", base + adj), ("half", base + 0.5 * adj), ("none", base)):
-            err = (blend - np.average(blend, weights=w)) - y_c
-            scores[name] = float(np.sqrt(np.average(err ** 2, weights=w)))
-            totals[name].append(scores[name])
-        print(f"{label:<14}{len(df):>5}{scores['full']:>11.4f}"
-              f"{scores['half']:>11.4f}{scores['none']:>11.4f}")
-
-    print(f"\n{'MEAN':<14}{'':>5}{np.mean(totals['full']):>11.4f}"
-          f"{np.mean(totals['half']):>11.4f}{np.mean(totals['none']):>11.4f}")
-    helps = sum(1 for f, n in zip(totals["full"], totals["none"]) if f < n)
-    print(f"\nFolds where the full adjustment beats none: {helps}/{len(labels)}")
-    if helps == 0:
-        print("  -> Double-counting confirmed in the full-xERA-trust regime. The runtime")
-        print("     scales this adjustment by (1 - bip_reliability) so it only applies")
-        print("     where xERA is absent or weakly trusted.")
+    deltas = [r["rmse"]["full (old)"] - r["rmse"]["none (runtime)"] for r in rows]
+    helps = sum(1 for d in deltas if d < 0)
+    print(f"\nFolds where the full adjustment beats none: {helps}/{len(rows)}   "
+          f"(RMSE delta per fold: {', '.join(f'{d:+.4f}' for d in deltas)})")
+    return helps, len(rows)
 
 
 def main():
@@ -359,58 +377,65 @@ def main():
         print(f"  {n}->{nxt}: {len(df)} qualified pitcher-seasons")
 
     centered = [_center(df) for df in pairs]
+    current = _current_fip_weight()
 
     fip_w, xera_w, raw_total = fit_weights(centered)
-    print("\n" + "=" * 78)
+    print("\n" + "=" * 86)
     print("FITTED WEIGHTS (all pairs pooled, weighted NNLS, normalized to sum 1)")
-    print("=" * 78)
+    print("=" * 86)
     print(f"  rFIP  {fip_w:.3f}")
     print(f"  xERA  {xera_w:.3f}")
-    print(f"  (raw coefficient sum before normalizing: {raw_total:.3f} -- well under 1 is")
-    print("   expected and fine; it's year-to-year regression to the mean, which the WAR")
-    print("   chassis handles by centering on the league average.)")
-    print(f"  current runtime weights: rFIP {_current_fip_weight():.3f} / "
-          f"xERA {1 - _current_fip_weight():.3f}")
+    print(f"  (raw coefficient sum before normalizing: {raw_total:.3f} -- the year-to-year")
+    print("   regression to the mean; the scoring below fits it per setting.)")
+    print(f"  current runtime weights: rFIP {current:.3f} / xERA {1 - current:.3f}")
 
-    wins, folds, fold_weights = loo_eval(centered, labels, fip_w)
-    batted_ball_residual_check(centered, fip_w)
-    batted_ball_variant_check(pairs, labels, _current_fip_weight())
+    wins, folds, _ = loo_eval(centered, labels, fip_w)
+    batted_ball_joint_fit(centered, current)
+    bb_helps, bb_folds = batted_ball_variant_check(centered, labels, current)
 
-    # Extra, clearly-labeled look at the in-progress season. Not fitted on.
+    # Extra, clearly-labeled look at the in-progress season. Not fitted on;
+    # every setting's scale comes from the four completed pairs.
     n, nxt = IN_PROGRESS_PAIR
     partial = build_pair(features, n, nxt)
     if len(partial):
         c = _center(partial)
-        print("\n" + "=" * 78)
+        print("\n" + "=" * 86)
         print(f"EXTRA OUT-OF-SAMPLE CHECK: {n}->{nxt} (season IN PROGRESS -- not fitted on)")
-        print("=" * 78)
+        print("=" * 86)
         print(f"  n = {len(partial)}")
-        for name, w in {"fitted": fip_w, "current": _current_fip_weight(), **BASELINES}.items():
-            rmse, mae = _wrmse_wmae(c, w)
+        for name, w in {"fitted": fip_w, "current": current, **BASELINES}.items():
+            rmse, mae = _score(c, w, 0.0, _fit_scale(centered, w))
             print(f"    {name:<12} RMSE {rmse:.4f}   MAE {mae:.4f}")
 
-    print("\n" + "=" * 78)
+    first, last = labels[0].split("->")[0], labels[-1].split("->")[1]
+    print("\n" + "=" * 86)
     print("DECISION")
-    print("=" * 78)
-    consistent = wins == folds
-    if consistent:
-        print(f"Fitted weights beat current on {wins}/{folds} folds -- consistent. Paste into")
-        print("app/cwar.py (already normalized, so the runtime's normalization is a no-op):")
+    print("=" * 86)
+    if wins == folds:
+        print(f"Blend weights: fitted beats current on {wins}/{folds} folds -- consistent.")
+        print("Paste into app/cwar.py (already normalized, so the runtime's normalization")
+        print("is a no-op):")
         print()
         print(f"    FIP_WEIGHT_BASE = {fip_w:.2f}")
         print(f"    CONTACT_WEIGHT_BASE = {xera_w:.2f}")
-        print(f"    # Fitted against next-season park-adjusted ERA over "
-              f"{labels[0].split('->')[0]}-{labels[-1].split('->')[1]} season pairs")
-        print(f"    # (scripts/tune_cwar_weights.py). Beat the prior hand-picked mix on "
-              f"{wins}/{folds} LOO folds.")
+        print(f"    # Fitted against next-season park-adjusted ERA over {first}-{last}")
+        print(f"    # season pairs (scripts/tune_cwar_weights.py); beat the prior mix on")
+        print(f"    # {wins}/{folds} leave-one-season-out folds.")
     else:
-        print(f"Fitted weights beat current on only {wins}/{folds} folds -- NOT consistent.")
-        print("Keep the current weights and record that they were validated, e.g.:")
-        print()
-        print("    # Validated against next-season park-adjusted ERA "
-              f"({labels[0].split('->')[0]}-{labels[-1].split('->')[1]} pairs,")
-        print(f"    # scripts/tune_cwar_weights.py): an empirical refit won only {wins}/{folds}")
-        print("    # leave-one-season-out folds, so these hand-picked values stand.")
+        print(f"Blend weights: fitted beats current on only {wins}/{folds} folds -- not")
+        print("consistent. Keep the current weights.")
+
+    print()
+    if bb_helps == bb_folds:
+        print(f"Batted-ball adjustment: full strength beats none on {bb_helps}/{bb_folds} folds,")
+        print("even with xERA at full trust -- it carries signal xERA misses. Consider")
+        print("dropping the runtime's (1 - bip_reliability) fade.")
+    elif bb_helps == 0:
+        print(f"Batted-ball adjustment: none beats full strength on {bb_folds}/{bb_folds} folds --")
+        print("at full xERA trust it only adds noise. The runtime's fade is justified.")
+    else:
+        print(f"Batted-ball adjustment: full strength beats none on {bb_helps}/{bb_folds} folds --")
+        print("inconclusive; no evidence either way at full xERA trust.")
 
 
 if __name__ == "__main__":

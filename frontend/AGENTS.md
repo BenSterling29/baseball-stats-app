@@ -82,18 +82,29 @@ every row is actually present. See `.standings-grid > .table-scroll` in `App.css
 ## Data fetching / error handling
 
 `App.jsx` keeps two per-cache-key maps: `cache` (successful responses) and `errors` (failed
-ones). A key present in either is never refetched; the error view's Retry button just deletes
-the key from `errors`, which re-arms the fetch effect. Fetches check `res.ok` and surface the
-backend's JSON `detail` message — don't add a fetch that stores a non-2xx body in `cache`, or
-the table code will try to render an error object as rows.
+ones). A key present in either is never refetched; the error view's Retry button deletes the
+key from `errors`. Fetches check `res.ok` and surface the backend's JSON `detail` message —
+don't add a fetch that stores a non-2xx body in `cache`, or the table code will try to render
+an error object as rows.
 
-Two input-to-fetch guards worth keeping intact:
+The fetch effect **must list `cache` and `errors` in its dependencies**: Retry only works
+because deleting a key from `errors` re-runs the effect (an earlier version left them out,
+and Retry silently did nothing). Since that also re-runs the effect whenever *any* key
+finishes loading, an `inFlight` ref of keys with a request outstanding stops those re-runs
+from firing duplicate requests. Keep both halves; either one alone reintroduces a bug.
+
+Input-to-fetch guards worth keeping intact:
 
 - The season box commits to state only when the value parses as a real season
   (1871..current+1, matching the backend's validation) — a half-typed year never fires a fetch.
-- Server-side min filters (the Savant tabs' `serverParam` config) go through a ~400ms debounce
-  (`useDebouncedValue`) before hitting the cache key/URL, so typing "100" doesn't fetch
-  min=1, min=10, min=100. Client-side min filters stay live (no fetch involved).
+- The min box has two states: `minInput` (what's displayed) and `minValue` (committed; drives
+  filtering and the Savant tabs' fetch URL/cache key). On server-side tabs (`serverParam`)
+  typing commits after ~400ms, so typing "100" doesn't fetch min=1, min=10, min=100;
+  client-side tabs commit immediately (no fetch involved).
+- **Tab switches reset filters inside `selectTab`, in the same event as `setTab`** — not in
+  an effect. An effect runs after the new tab's first render, so that render (and its fetch)
+  would use the previous tab's min value: Standings → Exit Velo would fetch the entire
+  leaderboard with `min_bbe=0` before refetching with 50.
 
 Sorting: the first click on a numeric column sorts descending (leaders first); text columns
 start ascending; a second click flips direction.

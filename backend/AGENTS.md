@@ -10,9 +10,11 @@ uvicorn app.main:app --reload   # http://localhost:8000
 ## Structure
 
 - `app/main.py` — FastAPI app, CORS (only allows `http://localhost:5173`), mounts the router.
-  Also a catch-all exception handler that turns unhandled errors (usually upstream scrape
-  failures) into a JSON 502 with a `detail` message, so the frontend can display something
-  useful instead of a bare "Internal Server Error" text body it can't parse.
+  Also exception handlers so errors come back as JSON with a `detail` message the frontend can
+  display, instead of a bare "Internal Server Error" text body it can't parse. Only
+  `requests.RequestException` (a network/HTTP failure reaching bref/Savant) is a 502
+  "Upstream data fetch failed"; everything else is a 500, so a bug in the app's own math isn't
+  misreported as the data source being down.
 - `app/pybaseball_client.py` — the only place that imports `pybaseball` or calls `pb.*`.
   Every function returns plain `list[dict]` (or `list[list[dict]]` for standings), never a
   DataFrame — routers should never touch pandas.
@@ -28,16 +30,23 @@ uvicorn app.main:app --reload   # http://localhost:8000
   - `cwar.rfip()` is a **shared** helper — `compute()` and `scripts/tune_cwar_weights.py` both
     call it, so the weights stay fitted on exactly the rate the runtime blends. Don't inline
     that math into either caller.
+  - `cwar.batted_ball_adjustment()` is shared the same way, so the tuning script's batted-ball
+    checks test the adjustment the runtime actually applies.
   - The batted-ball adjustment is scaled by `(1 - bip_reliability)` on purpose. xERA already
     encodes batted-ball mix (it's built from exit velocity *and* launch angle), so applying
-    both at full strength double-counts — measured as worse than no adjustment on 4/4
-    season-pair folds. Don't "fix" it back to unconditional.
+    both at full strength double-counts. The data only weakly backs this (dropping the
+    adjustment won 3/4 folds, small gaps), so treat it as a design choice, not a proven one.
+    Also know that the fade leaves the adjustment nearly inert past ~35 IP; see the README.
 - `scripts/tune_cwar_weights.py` — offline, manually-run, read-only analysis (NOT imported by
   the app). Fits cWAR's rFIP/xERA blend weights against next-season park-adjusted ERA with
   leave-one-season-pair-out validation, and reports the batted-ball diagnostics. Run it before
   changing `FIP_WEIGHT_BASE`/`CONTACT_WEIGHT_BASE`, and paste its constants block only if the
-  refit wins consistently across folds (as of the 2021-2025 pairs it does not — the current
-  weights are validated, not merely guessed). It fetches through the same disk cache the app
+  refit wins consistently across folds (as of the 2021-2025 pairs it does not: the data can't
+  distinguish mixes between ~0.53 and ~0.78 rFIP weight). **Score every setting
+  scale-invariantly** (its own scale, fitted on training folds): next-season ERA regresses ~40%
+  toward the mean, so scoring blends at a fixed 1x scale measures over-dispersion, not the
+  mix. An earlier version got this wrong, and it produced a spurious "refit loses 0/4 folds"
+  result and sign-flipped batted-ball coefficients. It fetches through the same disk cache the app
   uses; reuse `pybaseball_client._bwar_pitch_for_season` rather than calling `pb.bwar_pitch`
   per season, or you'll refetch a 100k-row file each time.
 - `app/guts.py` — static, hand-transcribed per-season FanGraphs "Guts!" constants (wOBA linear

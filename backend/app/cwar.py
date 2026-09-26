@@ -33,11 +33,14 @@ import pandas as pd
 
 from app import park_factors, pitcher_war_chassis
 
-# Validated, not fitted. scripts/tune_cwar_weights.py regressed next-season
-# park-adjusted ERA on (rFIP, xERA) over the 2021-2025 season pairs: the
-# empirical refit (0.66/0.34) failed to beat these on any of 4
-# leave-one-season-out folds, and swung across folds (0.53-0.78), so the
-# hand-picked pair stands. Re-run that script before changing them.
+# Hand-picked, and checked against data rather than fitted to it.
+# scripts/tune_cwar_weights.py regresses next-season park-adjusted ERA on
+# (rFIP, xERA) over the 2021-2025 season pairs. The empirical refit
+# (~0.66/0.34) beat these on only 1 of 4 leave-one-season-out folds, by
+# at most 0.0003 runs of RMSE, while losing the others by up to 0.007, and
+# its own weight swung 0.53-0.78 across folds. The data can't distinguish
+# mixes in that range, so there's no case for moving off this pair. Re-run
+# that script before changing them.
 FIP_WEIGHT_BASE = 0.70
 CONTACT_WEIGHT_BASE = 0.25
 
@@ -81,6 +84,32 @@ def _batted_ball_rates(df):
     return gb_pct, fb_pct
 
 
+def batted_ball_adjustment(df):
+    """Runs/9 adjustment for batted-ball mix vs league average, scaled by
+    IP reliability. `df` needs numeric IP plus GB%/FB%/PU% columns.
+
+    League averages are IP-weighted over whatever frame is passed in, so the
+    runtime passes the whole league. Missing batted-ball data falls back to
+    league average, making the adjustment a no-op for that pitcher rather
+    than injecting bias.
+
+    Shared with scripts/tune_cwar_weights.py so its checks test exactly the
+    adjustment the runtime applies; do not inline this math elsewhere.
+    """
+    def _league(col):
+        ok = df[col].notna() & df["IP"].notna()
+        return np.average(df.loc[ok, col], weights=df.loc[ok, "IP"]) if ok.any() else 0.0
+
+    league = {col: _league(col) for col in ("GB%", "FB%", "PU%")}
+    adj = (
+        -GB_RUN_COEF * (df["GB%"].fillna(league["GB%"]) - league["GB%"])
+        + FB_RUN_COEF * (df["FB%"].fillna(league["FB%"]) - league["FB%"])
+        - PU_RUN_COEF * (df["PU%"].fillna(league["PU%"]) - league["PU%"])
+    )
+    ip_reliability = (df["IP"] / IP_FULL_TRUST).clip(lower=0, upper=1).fillna(0)
+    return adj * ip_reliability
+
+
 def rfip(df):
     """HR-regressed FIP, as a Series. `df` must be a bref pitching frame with
     IP/SO/BB/HBP/HR/ER/BF already numeric-coerced and a 0-based index.
@@ -89,10 +118,13 @@ def rfip(df):
     FIP is returned alongside so callers can display both without recomputing.
 
     The FIP constant is derived from *actual* league totals, and the HR
-    regression is league-total-preserving by construction (the league's
-    expected-HR total equals its actual HR total, since league HR/FB is
-    defined as that ratio), so league rFIP lands on league ERA the same way
-    league FIP does -- the regression only moves HRs *between* pitchers.
+    regression is exactly league-total-preserving, so IP-weighted league
+    rFIP equals league FIP -- the regression only moves HRs *between*
+    pitchers. That does not come free: each pitcher's shift is
+    (1 - r_i) * (expected_i - HR_i), and with reliability r_i varying across
+    pitchers, a plain league HR/FB rate does not make those shifts sum to
+    zero. So the rate used for expected HR is the (1 - r)-weighted one,
+    which is the unique rate that does (see `league_hr_per_fb` below).
 
     Shared with scripts/tune_cwar_weights.py so the weights are fitted on
     exactly the rate the runtime blends; do not inline this math elsewhere.
@@ -112,18 +144,31 @@ def rfip(df):
     # interference are a rounding error at this scale).
     bf = pd.to_numeric(df.get("BF"), errors="coerce")
     bip = bf - df["SO"] - df["BB"] - df["HBP"] - df["HR"]
-    fb_count = fb_pct * bip
-
-    league_fb_count = fb_count.sum()
-    league_hr_per_fb = df["HR"].sum() / league_fb_count if league_fb_count > 0 else float("nan")
-    expected_hr = fb_count * league_hr_per_fb
+    # FB% is derived as 1 - LD - PU - GB%, and bref's rounded rates can sum
+    # past 1 on tiny samples, pushing it (and so fb_count) slightly
+    # negative. A negative count would make reliability negative and the
+    # regression extrapolate outside both the actual and expected HR.
+    fb_count = (fb_pct * bip).clip(lower=0)
 
     # A pitcher with no usable batted-ball data keeps his own HR total
     # (reliability 1) rather than being regressed toward a number we can't
     # compute for him -- missing data stays a no-op, per this module's
     # convention for the batted-ball and contact-quality inputs.
     fb_reliability = (fb_count / FB_FULL_TRUST).clip(upper=1).fillna(1.0)
-    regressed_hr = fb_reliability * df["HR"] + (1 - fb_reliability) * expected_hr.fillna(df["HR"])
+    shrink = 1 - fb_reliability
+
+    # League HR/FB, weighted by how much each pitcher is being regressed.
+    # This is the rate k solving sum(shrink * (k * fb_count - HR)) = 0, which
+    # is exactly what makes the regression league-total-preserving (see the
+    # docstring). Pitchers with no FB data have shrink 0 and drop out of
+    # both sums, so they can no longer inflate the numerator as they did
+    # when this was a plain sum(HR) / sum(fb_count).
+    weighted_fb = (shrink * fb_count).sum()
+    league_hr_per_fb = (
+        (shrink * df["HR"]).sum() / weighted_fb if weighted_fb > 0 else float("nan")
+    )
+    expected_hr = fb_count * league_hr_per_fb
+    regressed_hr = fb_reliability * df["HR"] + shrink * expected_hr.fillna(df["HR"])
 
     diagnostics = {
         "fip_constant": fip_constant,
@@ -170,23 +215,7 @@ def compute(pitching_df, expected_df, bwar_pitch_df, park_df):
     df = df.merge(exp[["mlbID", "xera", "bip"]], on="mlbID", how="left")
     df = df.rename(columns={"xera": "xERA"})
 
-    league_gb = np.average(df["GB%"].dropna(), weights=df.loc[df["GB%"].notna(), "IP"]) if df["GB%"].notna().any() else 0
-    league_fb = np.average(df["FB%"].dropna(), weights=df.loc[df["FB%"].notna(), "IP"]) if df["FB%"].notna().any() else 0
-    league_pu = np.average(df["PU%"].dropna(), weights=df.loc[df["PU%"].notna(), "IP"]) if df["PU%"].notna().any() else 0
-
-    # Missing batted-ball data falls back to league average, which makes the
-    # adjustment a no-op for that pitcher rather than injecting bias.
-    gb_for_adj = df["GB%"].fillna(league_gb)
-    fb_for_adj = df["FB%"].fillna(league_fb)
-    pu_for_adj = df["PU%"].fillna(league_pu)
-
-    batted_ball_adj = (
-        -GB_RUN_COEF * (gb_for_adj - league_gb)
-        + FB_RUN_COEF * (fb_for_adj - league_fb)
-        - PU_RUN_COEF * (pu_for_adj - league_pu)
-    )
-    ip_reliability = (df["IP"] / IP_FULL_TRUST).clip(upper=1).fillna(0)
-    batted_ball_adj = batted_ball_adj * ip_reliability
+    batted_ball_adj = batted_ball_adjustment(df)
 
     # Park-adjust the rFIP component only. rFIP is built from actual
     # outcomes and is park-inflated; xERA comes from exit velocity/launch
@@ -201,15 +230,20 @@ def compute(pitching_df, expected_df, bwar_pitch_df, park_df):
 
     # Apply the batted-ball adjustment only where xERA ISN'T already
     # accounting for contact quality. xERA is built from exit velocity *and
-    # launch angle*, so it already encodes batted-ball mix -- adding the
-    # adjustment on top of a full-strength xERA double-counts. Measured:
-    # against next-season ERA over the 2021-2025 season pairs, the
-    # unconditional adjustment was worse than none on 4 of 4 folds, and
-    # monotonically so (RMSE 1.0359 none / 1.0424 half / 1.0519 full; see
-    # scripts/tune_cwar_weights.py). Complementary weighting keeps the
-    # adjustment where it's the only contact signal available -- pitchers
-    # with little or no tracked batted-ball data, whom that test could not
-    # cover -- and fades it out exactly as xERA takes over.
+    # launch angle*, so it already encodes batted-ball mix, and adding the
+    # adjustment on top of a full-strength xERA double-counts. That's the
+    # reason for the fade; the data only weakly backs it. Against
+    # next-season ERA over the 2021-2025 season pairs (full-xERA-trust
+    # pitchers only), dropping the adjustment beat keeping it on 3 of 4
+    # folds, with mean RMSE 1.0059 none / 1.0066 half / 1.0081 full -- small
+    # gaps, inconclusive by the script's all-folds rule
+    # (scripts/tune_cwar_weights.py).
+    #
+    # In practice this leaves the adjustment nearly inert: multiplied by
+    # ip_reliability (inside batted_ball_adjustment), it peaks at about 17%
+    # strength near 17 IP and is ~0 for anyone past ~35 IP, since those
+    # pitchers have 100+ tracked balls in play. It survives only as a small
+    # nudge for low-inning arms with little or no Statcast data.
     batted_ball_adj = batted_ball_adj * (1 - bip_reliability)
     # The rFIP/xERA weights must be a convex combination (sum to exactly 1) --
     # blendedERA is an ERA-scale estimate, so any shortfall in the weight sum

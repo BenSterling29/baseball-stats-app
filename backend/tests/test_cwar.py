@@ -111,9 +111,9 @@ def test_groundball_tendency_earns_credit():
 def test_batted_ball_adjustment_fades_as_xera_takes_over():
     """xERA already encodes batted-ball mix (it's built from exit velocity
     and launch angle), so applying the mix adjustment on top of a
-    full-strength xERA double-counts. Measured against next-season ERA, the
-    unconditional version lost on 4/4 season-pair folds; the runtime now
-    scales it by (1 - bip_reliability). At full trust it must vanish."""
+    full-strength xERA double-counts. The runtime scales it by
+    (1 - bip_reliability); at full trust it must vanish, and at partial
+    trust part of it must survive."""
     pitching = _pitching_df()
     pitching.loc[1, "GB/FB"] = 0.60  # extreme groundballer
 
@@ -226,18 +226,60 @@ def test_rfip_matches_fip_when_hr_total_meets_expectation():
         assert out.loc[i, "rFIP"] == pytest.approx(out.loc[i, "FIP"], abs=0.03)
 
 
+def _numeric(pitching):
+    df = pitching.reset_index(drop=True).copy()
+    for col in ("IP", "SO", "BB", "HBP", "HR", "ER", "BF"):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def test_rfip_is_league_total_preserving():
     """The regression moves home runs between pitchers, it doesn't add or
-    remove them league-wide -- so IP-weighted league rFIP must land on
-    league FIP."""
+    remove them league-wide -- so IP-weighted league rFIP must equal league
+    FIP exactly. Regression test: with a plain sum(HR)/sum(FB) league rate
+    this only held approximately, because each pitcher's shift is
+    (1 - r_i) * (expected_i - HR_i) and reliability r_i varies; an earlier
+    version of this test used abs=0.05, loose enough to hide that."""
     pitching = _pitching_df()
     pitching.loc[1, "HR"] = 35
     pitching.loc[2, "HR"] = 5
-    out = _compute(pitching=pitching)
-    ip = out["IP"]
-    lg_rfip = (out["rFIP"] * ip).sum() / ip.sum()
-    lg_fip = (out["FIP"] * ip).sum() / ip.sum()
-    assert lg_rfip == pytest.approx(lg_fip, abs=0.05)
+    df = _numeric(pitching)
+    rfip_s, fip_s, _ = cwar.rfip(df)
+    ip = df["IP"]
+    lg_rfip = (rfip_s * ip).sum() / ip.sum()
+    lg_fip = (fip_s * ip).sum() / ip.sum()
+    assert lg_rfip == pytest.approx(lg_fip, abs=1e-9)
+
+
+def test_rfip_preserves_totals_with_missing_batted_ball_data():
+    """A pitcher with no FB data keeps his own HR (reliability 1). His HRs
+    must not leak into the league HR/FB rate the others are regressed
+    toward -- they used to, via a numerator that summed everyone's HR over
+    a denominator that skipped his missing fly-ball count."""
+    pitching = _pitching_df()
+    pitching.loc[1, "HR"] = 35
+    pitching.loc[3, ["GB/FB", "LD", "PU"]] = None
+    pitching.loc[3, "HR"] = 25  # lots of HR, but no FB count to regress him by
+    df = _numeric(pitching)
+    rfip_s, fip_s, _ = cwar.rfip(df)
+    assert rfip_s.iloc[2] == pytest.approx(fip_s.iloc[2])  # untouched
+    ip = df["IP"]
+    assert (rfip_s * ip).sum() == pytest.approx((fip_s * ip).sum(), abs=1e-9)
+
+
+def test_rfip_clips_negative_fly_ball_count():
+    """bref's rounded rates can sum past 1 on a tiny sample, making the
+    derived FB% negative. That must not produce negative reliability and an
+    extrapolated HR count outside both actual and expected."""
+    pitching = _pitching_df()
+    pitching.loc[3, ["GB/FB", "LD", "PU"]] = [0.60, 0.35, 0.10]  # sums to 1.05
+    df = _numeric(pitching)
+    rfip_s, fip_s, _ = cwar.rfip(df)
+    # FB count clips to 0 -> reliability 0 -> fully regressed to expected
+    # HR of 0 (no fly balls), i.e. rFIP equals FIP with zero home runs.
+    no_hr_fip = fip_s.iloc[2] - 13 * df.loc[2, "HR"] / df.loc[2, "IP"]
+    assert rfip_s.iloc[2] == pytest.approx(no_hr_fip)
+    assert rfip_s.notna().all()
 
 
 def test_rfip_regresses_small_samples_harder():

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 const CURRENT_YEAR = new Date().getFullYear()
@@ -12,17 +12,10 @@ function isValidSeason(value) {
   return Number.isInteger(value) && value >= MIN_SEASON && value <= MAX_SEASON
 }
 
-// Delays propagating a value until the user stops typing, so numeric filter
-// inputs that drive server-side fetches (Min BBE / Min PA) don't fire a
-// request per keystroke ("100" fetching min=1, then min=10, then min=100).
-function useDebouncedValue(value, delayMs = 400) {
-  const [debounced, setDebounced] = useState(value)
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(value), delayMs)
-    return () => clearTimeout(t)
-  }, [value, delayMs])
-  return debounced
-}
+// How long a typed server-side min filter (Min BBE / Min PA) waits before it
+// commits and triggers a fetch, so typing "100" doesn't fetch min=1, then
+// min=10, then min=100.
+const MIN_FILTER_DEBOUNCE_MS = 400
 
 const TABS = [
   { key: 'standings', label: 'Standings' },
@@ -198,18 +191,45 @@ function App() {
 
   const [search, setSearch] = useState('')
   const [teamFilter, setTeamFilter] = useState('ALL')
+  // minInput is what the box shows; minValue is the committed value that
+  // filters rows and (on Savant tabs) goes into the fetch URL/cache key.
+  const [minInput, setMinInput] = useState(0)
   const [minValue, setMinValue] = useState(0)
+  const minTimer = useRef(null)
   const [sort, setSort] = useState({ field: null, dir: 'asc' })
 
   const cfg = FILTER_CONFIG[tab]
 
-  // Reset filters when switching tabs, since columns/fields differ per tab.
-  useEffect(() => {
+  useEffect(() => () => clearTimeout(minTimer.current), [])
+
+  // Reset filters in the same event as the tab change, not in an effect
+  // afterwards: an effect runs after the new tab's first render, so that
+  // render (and its fetch) would use the previous tab's min value -- e.g.
+  // Standings -> Exit Velo fetching the whole leaderboard with min_bbe=0
+  // before refetching with 50.
+  const selectTab = (key) => {
+    const minDefault = FILTER_CONFIG[key]?.minDefault ?? 0
+    clearTimeout(minTimer.current)
+    setTab(key)
     setSearch('')
     setTeamFilter('ALL')
     setSort({ field: null, dir: 'asc' })
-    setMinValue(cfg?.minDefault ?? 0)
-  }, [tab])
+    setMinInput(minDefault)
+    setMinValue(minDefault)
+  }
+
+  // Server-side min filters refetch on commit, so debounce typing into them;
+  // client-side ones only filter loaded rows and commit immediately.
+  const handleMinInput = (raw) => {
+    const value = Number(raw)
+    setMinInput(value)
+    clearTimeout(minTimer.current)
+    if (cfg?.serverParam) {
+      minTimer.current = setTimeout(() => setMinValue(value), MIN_FILTER_DEBOUNCE_MS)
+    } else {
+      setMinValue(value)
+    }
+  }
 
   const handleSeasonInput = (value) => {
     setSeasonInput(value)
@@ -217,16 +237,19 @@ function App() {
     if (isValidSeason(parsed)) setSeason(parsed)
   }
 
-  // Server-side min filters (Savant tabs) refetch on change, so debounce
-  // them; client-side ones filter locally and can stay live.
-  const debouncedMin = useDebouncedValue(minValue)
-  const fetchMin = cfg?.serverParam ? debouncedMin : minValue
-
-  const cacheKey = buildCacheKey(tab, side, season, fetchMin)
+  const cacheKey = buildCacheKey(tab, side, season, minValue)
+  // Keys with a request outstanding. The fetch effect below depends on
+  // cache/errors (so Retry, which deletes an error, re-runs it); this keeps
+  // those unrelated re-runs from firing a duplicate request for a key that
+  // is already loading.
+  const inFlight = useRef(new Set())
 
   useEffect(() => {
     if (cache[cacheKey] !== undefined || errors[cacheKey] !== undefined) return
-    fetch(buildUrl(tab, side, season, fetchMin))
+    if (inFlight.current.has(cacheKey)) return
+    const key = cacheKey
+    inFlight.current.add(key)
+    fetch(buildUrl(tab, side, season, minValue))
       .then(async (r) => {
         if (!r.ok) {
           let detail = `HTTP ${r.status}`
@@ -238,13 +261,15 @@ function App() {
         }
         return r.json()
       })
-      .then((data) => setCache((prev) => ({ ...prev, [cacheKey]: data })))
-      .catch((e) => setErrors((prev) => ({ ...prev, [cacheKey]: String(e.message ?? e) })))
-  }, [cacheKey, tab, side, season, fetchMin])
+      .then((data) => setCache((prev) => ({ ...prev, [key]: data })))
+      .catch((e) => setErrors((prev) => ({ ...prev, [key]: String(e.message ?? e) })))
+      .finally(() => inFlight.current.delete(key))
+  }, [cacheKey, cache, errors, tab, side, season, minValue])
 
   const data = cache[cacheKey]
   const error = errors[cacheKey]
-  // Clearing a key's error re-arms the fetch effect above for that key.
+  // Deleting a key's error changes `errors`, which re-runs the fetch effect
+  // above; with no cached data or error left for the key, it refetches.
   const retry = () => setErrors((prev) => {
     const next = { ...prev }
     delete next[cacheKey]
@@ -313,7 +338,7 @@ function App() {
         </label>
         <nav className="tabs">
           {TABS.map((t) => (
-            <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => setTab(t.key)}>
+            <button key={t.key} className={tab === t.key ? 'active' : ''} onClick={() => selectTab(t.key)}>
               {t.label}
             </button>
           ))}
@@ -347,8 +372,8 @@ function App() {
             {cfg.minLabel}:{' '}
             <input
               type="number"
-              value={minValue}
-              onChange={(e) => setMinValue(Number(e.target.value))}
+              value={minInput}
+              onChange={(e) => handleMinInput(e.target.value)}
             />
           </label>
           {displayRows && <span className="result-count">{displayRows.length} players</span>}

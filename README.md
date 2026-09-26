@@ -107,9 +107,14 @@ league HR/FB rate. Fly balls come from `FB% × (BF − SO − BB − HBP − HR)
 `FB_FULL_TRUST = 400` fly balls, so a 180-IP starter (~200 FB) keeps about half his own HR
 total and borrows the rest from league rate. Unlike xFIP, which discards the actual HR total
 outright, this keeps real signal for pitchers with the sample to back it. The regression is
-league-total-preserving, so it only moves home runs *between* pitchers — league rFIP still
-lands on league ERA. Both `FIP` and `rFIP` are returned so you can see the gap; in 2026 the
-biggest movers are ~±0.9 runs (e.g. Jameson Taillon 6.55 → 5.30).
+exactly league-total-preserving, so it only moves home runs *between* pitchers and IP-weighted
+league rFIP equals league FIP. That takes one non-obvious step: each pitcher's shift is
+`(1 − r)·(expected − actual)` with reliability `r` varying by pitcher, so a plain
+`ΣHR / ΣFB` league rate would *not* make the shifts cancel. The rate used is the
+`(1 − r)`-weighted one, the unique rate that does. Pitchers with no batted-ball data keep
+their own HR total and stay out of that rate entirely. Both `FIP` and `rFIP` are returned so
+you can see the gap. As of late September 2026 the biggest movers shift about a run (e.g.
+Jameson Taillon 6.61 → 5.26, Max Fried 2.65 → 3.48).
 
 ### Park adjustment applies to rFIP only
 
@@ -133,13 +138,19 @@ mismatched replacement level or park convention.
 
 ### Why the batted-ball adjustment fades as xERA takes over
 
-xERA is built from exit velocity **and launch angle**, so it already encodes batted-ball mix.
-Applying the mix adjustment on top of a full-strength xERA double-counts, and the data says so:
-regressing next-season park-adjusted ERA over the 2021–2025 season pairs, the unconditional
-adjustment was *worse* than none on 4 of 4 folds, monotonically (weighted RMSE 1.0359 none /
-1.0424 half / 1.0519 full). The adjustment is therefore scaled by `(1 − bip_reliability)`, so
-it fades out exactly as xERA takes over and survives only where xERA is absent or weakly
-trusted — pitchers with little tracked batted-ball data, whom that test could not cover.
+xERA is built from exit velocity **and launch angle**, so it already encodes batted-ball mix,
+and applying the mix adjustment on top of a full-strength xERA double-counts. The adjustment is
+therefore scaled by `(1 − bip_reliability)`, fading out as xERA takes over.
+
+That rationale is conceptual first; the data only weakly backs it. Regressing next-season
+park-adjusted ERA over the 2021–2025 season pairs (full-xERA-trust pitchers), dropping the
+adjustment beat keeping it on 3 of 4 folds, with mean weighted RMSE 1.0059 none / 1.0066 half /
+1.0081 full. Those are small gaps, inconclusive under the tuning script's all-folds rule.
+
+Be aware it leaves the adjustment nearly inert. Combined with its own IP-reliability ramp, it
+peaks at about 17% strength near 17 IP and is effectively zero past ~35 IP, since those
+pitchers have 100+ tracked balls in play. It survives only as a small nudge for low-inning
+arms with little or no Statcast data.
 
 ### Tuning the weights
 
@@ -157,11 +168,24 @@ It prints fitted weights, per-fold RMSE/MAE against the current weights and FIP-
 xERA-only / 50-50 baselines, the batted-ball diagnostics above, and a paste-ready constants
 block **only if** the refit beats the current weights consistently across folds.
 
-As of the 2021–2025 pairs it does not: the empirical refit (0.66/0.34) lost on 0/4 folds and
-swung across folds (0.53–0.78), so the hand-picked 70/25 pair stands — now as a *validated*
-choice rather than an untested one. The batted-ball coefficients are deliberately not co-fit
-(xERA already carries that signal, and GB/FB/PU are structurally collinear); they're reported
-as a residual diagnostic instead.
+Every setting is scored **scale-invariantly**: each gets its own best scale factor, fitted on
+the training folds only, before being scored on the held-out fold. That matters because
+next-season ERA regresses about 40% toward the mean for everyone, so the best *prediction* is a
+shrunk blend (~0.6×). The runtime never needs that scale, since the WAR chassis centers on the
+league average, so what the constants encode is only the mix. Scoring at a fixed 1× scale
+instead rewards whichever mix minimizes the over-dispersion error, which is a different
+question. An earlier version of the script did exactly that, and its conclusions (a 0/4-fold
+loss for the refit, and "sign-flipped" batted-ball coefficients) were artifacts of it.
+
+With fair scoring, as of the 2021–2025 pairs: the empirical refit (~0.66/0.34) beats the
+hand-picked 70/25 on only 1 of 4 folds, by 0.0003 runs, while losing the others by up to
+0.007, and its own weight swings 0.53–0.78 across folds. The data can't tell mixes in that
+range apart, so 70/25 stays. That is "no case for changing it", not proof it's optimal.
+
+The batted-ball coefficients are deliberately not co-fit into the weights (xERA already carries
+much of that signal, and GB/FB/PU are structurally collinear). Instead the script fits them
+jointly with the blend as a diagnostic. Expressed in the runtime's units, GB and PU come out
+with the same sign as the hand-picked coefficients, but none is statistically significant.
 
 One data quirk worth knowing if you touch this code: pybaseball labels bref's ground-ball-rate
 column `GB/FB`, but it's actually GB% (a rate, 0-1), not a ratio — confirmed by checking known
