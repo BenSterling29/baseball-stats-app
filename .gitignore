@@ -11,3 +11,6 @@ frontend/dist/
 # pybaseball on-disk cache
 backend/.pybaseball_cache/
 ~/.pybaseball/
+
+# sWAR prototype data cache (Statcast parquet + OpenCommand subset)
+backend/data/

@@ -71,6 +71,31 @@ uvicorn app.main:app --reload   # http://localhost:8000
 - `app/war_compare.py` — pure merge (no new math) of bWAR/fWAR/cWAR's already-computed output
   onto one row per pitcher, for the frontend's "WAR Compare" tab. Called from
   `pybaseball_client.get_pitcher_war_compare`.
+- `app/swar.py` — **prototype**, pure-pandas math for sWAR, a pitch-quality pitcher WAR (a Stuff
+  model stacked with a Command model from OpenCommand's inferred catcher targets). Same contract
+  as `cwar.py`: no `pybaseball` import, and no model training either — the per-pitch Stuff and
+  Command predictions come in from `scripts/swar_prototype.py`. **NOT wired into the app yet**:
+  no route, no `pybaseball_client` function, not in WAR Compare. It still goes through
+  `pitcher_war_chassis.war_from_rate` like the other three, so it stays comparable. One
+  load-bearing detail: `sRA9` is built from pitch physics and per-pitch run values, so it's
+  already park-neutral. The chassis divides the rate by PF, so `compute()` pre-multiplies
+  `sRA9 × PF` to cancel that. Don't "fix" this by dropping the multiply, or you'll park-adjust
+  twice. PF still feeds dynamic runs-per-win.
+- `scripts/swar_prototype.py` — offline, manually-run, network-bound prototype (NOT imported by
+  the app). Pulls Statcast (pybaseball, weekly chunks, resumable) and the OpenCommand subset
+  (Hugging Face), trains the Stuff/Command models, and prints the next-season validation report
+  against ERA/FIP/rFIP/cWAR. Caches everything under `backend/data/swar/` (gitignored). Things to
+  know:
+  - pybaseball's Statcast has no `play_id`, which is OpenCommand's key, so the join is on
+    `(game_pk, pitcher, batter, vx0, vy0)` with the velocities rounded to 0.01. The script
+    prints the join rate and **hard-stops below 90%**. If it trips, check the join key first;
+    don't lower the threshold.
+  - Don't run two pulls at once. They write the same chunk/parquet files in the cache dir.
+  - Its extra deps (`scikit-learn`, `huggingface_hub`) live in `requirements-prototype.txt`,
+    kept out of the app's runtime `requirements.txt`. Don't fold them in with `pip freeze`
+    unless sWAR actually ships.
+  - OpenCommand is CC BY-NC-SA 4.0 (attribution, non-commercial). Keep the credit in the README
+    if any of this ever reaches the app.
 
 ## Adding a new stat endpoint
 

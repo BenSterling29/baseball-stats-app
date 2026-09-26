@@ -39,6 +39,10 @@ backend/
     main.py                 FastAPI app + CORS
     pybaseball_client.py    wraps pybaseball calls, enables its disk cache
     routers/stats.py        API routes (see below)
+    swar.py                 sWAR prototype math (not wired into the app)
+  scripts/
+    swar_prototype.py       offline sWAR prototype: data pull + validation report
+  requirements-prototype.txt  extra deps for the prototype only
 frontend/
   src/App.jsx               tabs: standings / batting / pitching / exit velo / expected stats
   src/App.css
@@ -280,6 +284,53 @@ merges all three pitcher WAR metrics onto one row per pitcher — Name, Tm, IP, 
 make players the methodologies disagree on easy to spot. It's a pure merge of each metric's
 already-computed output — no new math, and none of `bwar_pitching.py`/`fwar_pitching.py`/
 `cwar.py` themselves are touched by it.
+
+## sWAR (prototype): Stuff + Command
+
+`sWAR` is an offline experiment and is **not in the app yet**: no route, no tab, and it isn't
+in WAR Compare. It's a pitch-quality pitcher WAR made of two parts:
+
+- **Stuff** is the expected run value of a pitch from its physical traits alone: velocity,
+  movement, spin, release point, extension, and differences from the pitcher's primary
+  fastball. It uses no location, count, or batter. The approach follows
+  [tjStuff+](https://github.com/tnestico/tjstuff_plus).
+- **Command** measures the runs a pitch gained or lost by missing where the catcher set up. It
+  uses the catcher targets that [OpenCommand](https://github.com/tomdoyo/open-command) infers
+  from broadcast video. Where the target was set is held fixed, so a pitcher is judged on how
+  he missed, not on where the catcher asked for the ball.
+
+Per-pitch runs saved become a runs-allowed-per-9 rate. That rate goes through the same
+chassis as bWAR/fWAR/cWAR (`backend/app/pitcher_war_chassis.py`), so the numbers stay
+comparable. The prototype's one question is whether Stuff + Command predicts next-season run
+prevention better than FIP, rFIP, or the cWAR blend. It only moves into the app if the answer
+is yes. The math is in `backend/app/swar.py`. The data pull, model training, and validation
+report are in `backend/scripts/swar_prototype.py`.
+
+To run it (it's network-bound; the data is cached under `backend/data/swar/`, which is
+gitignored):
+
+```bash
+cd backend && ./venv/bin/pip install -r requirements-prototype.txt
+./venv/bin/python -m scripts.swar_prototype
+```
+
+**First-run findings (2026-09-26, seasons 2023–2026):** the answer so far is **no**. Held-out
+RMSE against next-season park-adjusted ERA (2024→25 and the partial 2025→26):
+
+- The cWAR blend is best, at 1.031.
+- Stuff alone is roughly on par with rFIP and xERA (1.047–1.073 on the command-era pairs, 1.031–1.035 across all three pairs).
+- Stuff + Command is worse (about 1.10).
+- Command on its own barely predicts ERA (r ≈ 0.09).
+
+Command does track walks: its correlation with next-season BB% is −0.27 to −0.36. That is weaker than BB% predicting itself (≈0.58). As currently built, Stuff and Command are added 1:1 in runs, and the command term mostly adds noise. The next things to try are separately fitted Stuff and Command weights, or using Command to regress BB% instead of runs. Nothing moves into the app until one of those beats the cWAR blend.
+
+**Data credits and licenses:**
+- OpenCommand ([code](https://github.com/tomdoyo/open-command),
+  [dataset](https://huggingface.co/datasets/tomdoyo/open-command)) is licensed
+  **CC BY-NC-SA 4.0**. Use requires attribution and must be non-commercial.
+- [tjStuff+](https://github.com/tnestico/tjstuff_plus) is MIT-licensed. The Stuff model here
+  follows its methodology.
+- Pitch-level data is Statcast (Baseball Savant), fetched through pybaseball.
 
 ## Why not FanGraphs directly?
 
